@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>2win - Игра</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="card">
+<h1>Игра: <span id="game-name"></span></h1>
+<div id="game-area" style="text-align:center; font-size:1.5em; margin-top:20px;"></div>
+<button onclick="startGame()">Начать игру</button>
+<p>Ваш баланс: <span id="balance">1000</span> монет</p>
+<nav>
+<a class="button-link" href="games.html">Выбрать другую игру</a>
+</nav>
+</div>
+<script>
+const urlParams = new URLSearchParams(window.location.search);
+const game = urlParams.get('game');
+document.getElementById('game-name').textContent = game;
+
+let balance = 1000; // начальный баланс
+
+// сохранить баланс в localStorage
+if(localStorage.getItem('balance')){
+  balance = parseInt(localStorage.getItem('balance'));
+} else {
+  localStorage.setItem('balance', balance);
+}
+document.getElementById('balance').textContent = balance;
+
+function updateBalance(amount) {
+  balance += amount;
+  localStorage.setItem('balance', balance);
+  document.getElementById('balance').textContent = balance;
+}
+
+function startGame() {
+  if(balance < 10){
+    alert("Недостаточно монет! Пополните баланс");
+    return;
+  }
+  // разные игры
+  if(game === 'случайное_число'){
+    let bet = 10;
+    if(balance < bet){
+      alert("Недостаточно монет для ставки");
+      return;
+    }
+    updateBalance(-bet);
+    const rand = Math.floor(Math.random() * 100) + 1;
+    alert("Вам выпало число: " + rand);
+    if(rand > 50){
+      alert("Вы выиграли 20 монет!");
+      updateBalance(20);
+    }else{
+      alert("Проигрыш! Попробуйте еще раз");
+    }
+  } else if(game === 'лотерея'){
+    let bet = 20;
+    if(balance < bet){
+      alert("Недостаточно монет для ставки");
+      return;
+    }
+    updateBalance(-bet);
+    const luckyNumber = Math.floor(Math.random() * 10);
+    const userNumber = Math.floor(Math.random() * 10);
+    alert(`Ваш номер: ${userNumber}, Лотерея: ${luckyNumber}`);
+    if(userNumber === luckyNumber){
+      alert("Поздравляем! Вы выиграли 100 монет");
+      updateBalance(100);
+    }else{
+      alert("Не повезло! Попробуйте еще раз");
+    }
+  } else if(game === 'слепой_кубик'){
+    let bet = 15;
+    if(balance < bet){
+      alert("Недостаточно монет для ставки");
+      return;
+    }
+    updateBalance(-bet);
+    const roll = Math.floor(Math.random() * 6) + 1;
+    alert("Вам выпал кубик: " + roll);
+    if(roll >= 4){
+      alert("Вы выиграли 30 монет");
+      updateBalance(30);
+    }else{
+      alert("Проигрыш");
+    }
+  } else {
+    alert("Неизвестная игра");
+  }
+}
+</script>
+</div>
+</body>
+</html>
