@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>2win - Пополнение</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="card">
+<h1>Пополнить баланс</h1>
+<p>Введите сумму для пополнения (вымышленные деньги)</p>
+<input type="number" id="amount" min="1" />
+<button onclick="replenish()">Пополнить</button>
+<p>Ваш текущий баланс: <span id="current-balance">1000</span></p>
+<nav>
+<a class="button-link" href="index.html">На главную</a>
+</nav>
+</div>
+<script>
+let balance = 1000;
+if(localStorage.getItem('balance')){
+  balance = parseInt(localStorage.getItem('balance'));
+}
+document.getElementById('current-balance').textContent = balance;
+
+function replenish() {
+  const amount = parseInt(document.getElementById('amount').value);
+  if(amount > 0){
+    balance += amount;
+    localStorage.setItem('balance', balance);
+    document.getElementById('current-balance').textContent = balance;
+    alert('Баланс пополнен на ' + amount + ' монет!');
+  } else {
+    alert('Введите корректную сумму');
+  }
+}
+</script>
+</div>
+</body>
+</html>
