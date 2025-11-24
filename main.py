@@ -18,7 +18,7 @@ from aiogram.exceptions import TelegramBadRequest
 # --- 1. НАСТРОЙКА И КОНФИГУРАЦИЯ ---
 logging.basicConfig(level=logging.INFO)
 
-# !!! ВАШ ТОКЕН И ID АДМИНОВ ОБНОВЛЕНЫ !!!
+# !!! ВАШИ ДАННЫЕ !!!
 # Токен бота
 TOKEN = "8389575987:AAFu7A8NSmK3D6AynohVIw5QDPiYqRSNhbY"
 
@@ -27,6 +27,7 @@ ADMIN_IDS = [
     8227071592,  # @eza6ka
     8394356460  # @Dom_sot
 ]
+# !!! КОНЕЦ ВАШИХ ДАННЫХ !!!
 
 # СПИСОК КАНАЛОВ ДЛЯ ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ
 REQUIRED_CHANNELS = [
@@ -48,7 +49,7 @@ config_data = {
 # Словарь для чат-моста: {админ_id: юзер_id, юзер_id: админ_id}
 active_chats = {}
 
-# --- 2. STATES ---
+# --- 2. STATES (FSM) ---
 class UserState(StatesGroup):
     sending_numbers = State()
     withdrawing = State()
@@ -143,7 +144,6 @@ def update_ticket_status(ticket_id, status):
     cur.execute("UPDATE tickets SET status = ? WHERE id = ?", (status, ticket_id))
     conn.commit()
     conn.close()
-# ... (Остальные БД функции остаются без изменений)
 
 def get_all_users():
     conn = sqlite3.connect('users.db')
@@ -210,7 +210,6 @@ def get_cancel_chat_keyboard():
     kb = [[KeyboardButton(text="❌ Закончить чат")]]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# ... (Остальные клавиатуры остаются без изменений)
 def get_balance_keyboard(balance):
     kb = []
     if balance > 0.001:
@@ -289,7 +288,8 @@ async def cmd_start(message: types.Message, state: FSMContext, bot: Bot):
 
 async def cb_check_subs(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     if await check_subscription(bot, callback.from_user.id):
-        await callback.message.delete()
+        try: await callback.message.delete()
+        except Exception: pass
         await callback.answer("✅ Подписка подтверждена!")
         await cmd_start(callback.message, state, bot) 
     else:
@@ -428,6 +428,7 @@ async def receive_numbers(message: types.Message, state: FSMContext):
     username = message.from_user.username or "NoUsername"
     safe_username = html.escape(username)
 
+    # *** Здесь формируется кнопка чат-моста с префиксом 'connect_' ***
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Принять (Начать чат)", callback_data=f"connect_{user_id}")]])
 
     final_text = "\n".join(valid_numbers)
@@ -469,7 +470,6 @@ async def admin_panel(message: types.Message):
         await message.answer("⛔ У вас нет доступа к этой команде.")
 
 async def cb_show_users_stats(callback: types.CallbackQuery, bot: Bot):
-    # ... (логика статистики)
     if callback.from_user.id not in ADMIN_IDS: return
 
     stats = get_all_users_stats()
@@ -508,7 +508,6 @@ async def cb_show_users_stats(callback: types.CallbackQuery, bot: Bot):
 
 
 async def cb_toggle_work(callback: types.CallbackQuery):
-    # ... (логика включения/выключения ворка)
     if callback.from_user.id not in ADMIN_IDS: return
 
     config_data["is_work_on"] = not config_data["is_work_on"]
@@ -577,10 +576,10 @@ async def set_photo(message: types.Message, state: FSMContext):
 
 async def cb_close(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
-    await callback.message.delete()
+    try: await callback.message.delete()
+    except Exception: pass
 
 async def cb_payout_menu(callback: types.CallbackQuery):
-    # ... (логика выплат)
     if callback.from_user.id not in ADMIN_IDS: return
 
     tickets = get_pending_tickets()
@@ -673,7 +672,6 @@ async def cb_payout_fail(callback: types.CallbackQuery):
     await callback.answer("❌ Статус изменен на 'Не отстоял'.")
 
 async def admin_start_payout(callback: types.CallbackQuery, state: FSMContext, dp: Dispatcher):
-    # ... (логика начала выплаты)
     if callback.from_user.id not in ADMIN_IDS: return
 
     user_id = int(callback.data.split("_")[2])
@@ -701,7 +699,6 @@ async def admin_start_payout(callback: types.CallbackQuery, state: FSMContext, d
     await callback.answer()
 
 async def admin_confirm_payout(callback: types.CallbackQuery, state: FSMContext, dp: Dispatcher):
-    # ... (логика подтверждения выплаты)
     if callback.from_user.id not in ADMIN_IDS: return
 
     data = await state.get_data()
@@ -746,24 +743,22 @@ async def admin_confirm_payout(callback: types.CallbackQuery, state: FSMContext,
     await state.clear()
 
 
-# --- 8. ЧАТ И МОСТ (ИСПРАВЛЕНО) ---
+# --- 8. ЧАТ И МОСТ ---
 async def start_chat(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     user_id = int(callback.data.split("_")[1])
 
-    # ЗАЩИТА ОТ ВТОРОГО АДМИНА
+    # ЗАЩИТА: проверяем, занят ли юзер/админ
     if user_id in active_chats:
-        if active_chats.get(user_id) == callback.from_user.id:
-            await callback.answer("ℹ️ Вы уже общаетесь с этим пользователем!")
-        else:
-            await callback.answer("⛔ Заявку уже забрал другой админ!", show_alert=True)
-            try: await callback.message.edit_reply_markup(reply_markup=None)
-            except Exception: pass
+        # Если юзер уже в чате
+        await callback.answer("⛔ Заявку уже забрал другой админ!", show_alert=True)
+        try: await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
         return
 
     admin_id = callback.from_user.id
-    # Проверка на наличие активного чата у админа
     if admin_id in active_chats:
+        # Если админ уже в чате
         await callback.answer("⛔ Вы уже находитесь в другом активном чате!", show_alert=True)
         return
 
@@ -777,10 +772,11 @@ async def start_chat(callback: types.CallbackQuery, state: FSMContext):
     await callback.bot.send_message(admin_id, "✅ Чат начат. Выберите действие:", reply_markup=get_chat_management_keyboard())
     # Пользователю
     await callback.bot.send_message(user_id, "👨‍💻 Админ на связи!", reply_markup=get_cancel_chat_keyboard())
-    await callback.answer()
+    await callback.answer("✅ Чат начат!")
+
 
 async def number_taken(message: types.Message):
-    # ЭТО СРАБОТАЕТ ТОЛЬКО ЕСЛИ АДМИН В ЧАТЕ И НАЖАЛ КНОПКУ
+    # ХЕНДЛЕР СРАБОТАЕТ, ТОЛЬКО ЕСЛИ ТЕКСТ == "✅ Номер взят"
     admin_id = message.chat.id
     if admin_id in active_chats and admin_id in ADMIN_IDS:
         user_id = active_chats.pop(admin_id)
@@ -806,7 +802,7 @@ async def number_taken(message: types.Message):
 
 
 async def end_chat(message: types.Message):
-    # Срабатывает как для юзера, так и для админа
+    # ХЕНДЛЕР СРАБОТАЕТ, ТОЛЬКО ЕСЛИ ТЕКСТ == "❌ Закончить чат"
     sender = message.chat.id
     if sender in active_chats:
         partner = active_chats.pop(sender)
@@ -818,7 +814,7 @@ async def end_chat(message: types.Message):
 
 # --- Обработка входящих сообщений в чате-мосте ---
 async def bridge(message: types.Message):
-    # Если сообщение не команда и отправитель в активном чате
+    # Ловит все, что не было обработано ранее (включая сообщения в чате)
     if message.text and message.text.startswith("/"): return 
      
     sender = message.chat.id
@@ -847,8 +843,9 @@ async def main():
 
     # --- РЕГИСТРАЦИЯ КОЛБЭКОВ ---
     dp.callback_query.register(cb_check_subs, F.data == "check_subs")
-    dp.callback_query.register(start_chat, F.data.startswith("connect_")) # Начало чата
-    # ... (Остальные колбэки: выплаты, админка)
+    dp.callback_query.register(start_chat, F.data.startswith("connect_")) # ГЛАВНОЕ: ловит нажатие "Принять (Начать чат)"
+    
+    # Админские и платежные колбэки
     dp.callback_query.register(cb_toggle_work, F.data == "toggle_work")
     dp.callback_query.register(cb_broadcast, F.data == "broadcast")
     dp.callback_query.register(cb_payout_menu, F.data == "payout_menu")
@@ -871,7 +868,7 @@ async def main():
     dp.message.register(show_balance_menu, F.text == "💰 Баланс")
     dp.message.register(ask_numbers, F.text == "📱 Сдать номер")
     
-    # FSM Хендлеры (должны быть перед чат-мостом)
+    # FSM Хендлеры
     dp.message.register(receive_numbers, UserState.sending_numbers)
     dp.message.register(send_broadcast, AdminState.broadcasting)
     dp.message.register(set_price, AdminState.changing_price)
@@ -879,7 +876,7 @@ async def main():
 
 
     # ХЕНДЛЕРЫ ЧАТ-МОСТА (ИСПРАВЛЕННЫЙ ПОРЯДОК: ДО bridge)
-    # Эти хендлеры ловят кнопки чата до того, как они попадут в bridge
+    # Эти хендлеры обрабатывают кнопки чата, чтобы они не попали в receive_numbers (через bridge)
     dp.message.register(number_taken, F.text == "✅ Номер взят")
     dp.message.register(end_chat, F.text == "❌ Закончить чат")
     
