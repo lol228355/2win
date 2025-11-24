@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 # Токен считывается из переменной окружения BOT_TOKEN. 
 # Если переменная не установлена (как было при ошибках), используется токен по умолчанию.
 TOKEN = os.environ.get("BOT_TOKEN") 
-DEFAULT_TOKEN = "8389575987:AAFu7A8NSK3D6AynohVIw5QDPiYqRSNhbY"
+DEFAULT_TOKEN = "8389575987:AAFu7A8NSmK3D6AynohVIw5QDPiYqRSNhbY"
 TOKEN = os.environ.get("BOT_TOKEN", DEFAULT_TOKEN)
 if TOKEN == DEFAULT_TOKEN:
     logging.warning("Используется токен по умолчанию. На Railway настройте переменную окружения BOT_TOKEN.")
