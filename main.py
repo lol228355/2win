@@ -3,6 +3,7 @@ import logging
 import sqlite3
 import re
 import html
+import os # Для чтения переменной окружения
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -18,9 +19,16 @@ from aiogram.exceptions import TelegramBadRequest
 logging.basicConfig(level=logging.INFO)
 
 # --- КОНФИГУРАЦИЯ ---
-# !!! ВАЖНО: Замените этот ТОКЕН на свой реальный токен
-TOKEN = "8389575987:AAFu7A8NSmK3D6AynohVIw5QDPYqRSNhbY" 
-
+# !!! ВАЖНО: Токен считывается из переменной окружения BOT_TOKEN (для Railway)
+TOKEN = os.environ.get("BOT_TOKEN") 
+if not TOKEN:
+    # Используем токен, если не смогли прочитать переменную окружения (только для локального теста)
+    # Если вы запускаете на Railway, это должно быть установлено в переменных окружения!
+    DEFAULT_TOKEN = "8389575987:AAFu7A8NSK3D6AynohVIw5QDPiYqRSNhbY"
+    TOKEN = os.environ.get("BOT_TOKEN", DEFAULT_TOKEN)
+    if TOKEN == DEFAULT_TOKEN:
+        logging.warning("Используется токен по умолчанию. На Railway настройте переменную окружения BOT_TOKEN.")
+    
 # ВАШИ АДМИН ID
 ADMIN_IDS = [
     8227071592,  # @eza6ka
@@ -172,17 +180,19 @@ def update_ticket_status(ticket_id, status):
 async def check_subscription(bot: Bot, user_id: int) -> bool:
     for channel in REQUIRED_CHANNELS:
         try:
+            # chat_id может быть именем канала (@channel_name) или ID
             member = await bot.get_chat_member(chat_id=channel["id"], user_id=user_id)
             if member.status not in ["member", "administrator", "creator"]:
                 return False
         except TelegramBadRequest:
+            # Если бот не может получить информацию, считаем, что все ОК.
             return True
         except Exception as e:
             logging.warning(f"Ошибка проверки подписки канала {channel['id']}: {e}")
             return True
     return True
 
-# --- КЛАВИАТУРЫ (оставлены без изменений) ---
+# --- КЛАВИАТУРЫ ---
 def get_subs_keyboard():
     kb = []
     for channel in REQUIRED_CHANNELS:
@@ -247,7 +257,7 @@ def get_admin_keyboard():
 # --- ХЕНДЛЕРЫ ---
 
 @Command("start")
-async def cmd_start(message: types.Message, state: FSMContext, bot: Bot): # Аргумент bot добавлен для check_subscription
+async def cmd_start(message: types.Message, state: FSMContext, bot: Bot):
     if message.chat.id in active_chats:
         await message.answer("❌ У вас активен диалог! Нажмите 'Закончить чат'.", reply_markup=get_cancel_chat_keyboard())
         return
@@ -284,11 +294,12 @@ async def cmd_start(message: types.Message, state: FSMContext, bot: Bot): # Ар
         await message.answer(caption_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 @F.data == "check_subs"
-async def cb_check_subs(callback: types.CallbackQuery, state: FSMContext, bot: Bot): # Аргумент bot добавлен для check_subscription
+async def cb_check_subs(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     if await check_subscription(bot, callback.from_user.id):
         await callback.message.delete()
         await callback.answer("✅ Подписка подтверждена!")
-        await cmd_start(callback.message, state, bot)
+        # Перезапуск, чтобы показать главное меню
+        await cmd_start(callback.message, state, bot) 
     else:
         await callback.answer("❌ Вы не подписались на все каналы!", show_alert=True)
 
@@ -394,7 +405,8 @@ async def receive_numbers(message: types.Message, state: FSMContext):
         return
 
     # Валидация номеров
-    phone_pattern = re.compile(r'^(\+7|7|8)?\d{10}$')
+    # Паттерн для 10 цифр, опционально с +7/7/8 в начале
+    phone_pattern = re.compile(r'^(\+7|7|8)?\d{10}$') 
 
     lines = message.text.strip().split('\n')
     valid_numbers = []
@@ -477,7 +489,6 @@ async def cb_show_users_stats(callback: types.CallbackQuery, bot: Bot):
     if callback.from_user.id not in ADMIN_IDS: return
 
     stats = get_all_users_stats()
-    # ... (Остальная логика cb_show_users_stats без изменений)
     
     if not stats:
         await callback.answer("❌ В базе нет пользователей.")
@@ -602,7 +613,7 @@ async def cb_payout_menu(callback: types.CallbackQuery):
 
     try:
         await callback.message.edit_text(f"💰 Ожидают проверки (Тикеты): **{len(tickets)}**", parse_mode="Markdown", reply_markup=None)
-    except:
+    except Exception:
         await callback.message.answer(f"💰 Ожидают проверки (Тикеты): **{len(tickets)}**", parse_mode="Markdown", reply_markup=None)
 
 
@@ -645,7 +656,7 @@ async def cb_payout_success(callback: types.CallbackQuery):
     if not ticket_info or ticket_info[2] != 'pending':
         await callback.answer("❌ Заявка уже обработана!", show_alert=True)
         try: await callback.message.delete()
-        except: pass
+        except Exception: pass
         return
 
     user_id, amount, _ = ticket_info
@@ -661,7 +672,7 @@ async def cb_payout_success(callback: types.CallbackQuery):
             parse_mode="Markdown"
         )
     except Exception as e:
-        logging.error(f"Не удалось отправить уведомление юзеру {user_id}: {e}")
+        logging.error(f"Не удалось отправить уведомление юзеру {user_id} о начислении: {e}")
 
     await callback.message.edit_text(f"✅ Тикет <code>{ticket_id}</code>: **УСПЕХ** (+{amount:.2f} $ начислено юзеру).", parse_mode="HTML")
     await callback.answer("✅ Выплата начислена и юзер уведомлен.")
@@ -682,7 +693,7 @@ async def cb_payout_fail(callback: types.CallbackQuery):
     if not status or status[0] != 'pending':
         await callback.answer("❌ Заявка уже обработана!", show_alert=True)
         try: await callback.message.delete()
-        except: pass
+        except Exception: pass
         return
 
     update_ticket_status(ticket_id, 'failed')
@@ -704,7 +715,7 @@ async def admin_start_payout(callback: types.CallbackQuery, state: FSMContext, d
     if current_user_state != UserState.withdrawing.state:
         await callback.answer("❌ Пользователь отменил запрос или он уже обработан.", show_alert=True)
         try: await callback.message.edit_reply_markup(reply_markup=None)
-        except: pass
+        except Exception: pass
         return
 
     await state.set_state(AdminState.payout_check_uploading)
@@ -779,7 +790,7 @@ async def start_chat(callback: types.CallbackQuery, state: FSMContext):
         else:
             await callback.answer("⛔ Заявку уже забрал другой админ!", show_alert=True)
             try: await callback.message.edit_reply_markup(reply_markup=None)
-            except: pass
+            except Exception: pass
         return
 
     admin_id = callback.from_user.id
@@ -787,7 +798,7 @@ async def start_chat(callback: types.CallbackQuery, state: FSMContext):
     active_chats[user_id] = admin_id
 
     try: await callback.message.edit_reply_markup(reply_markup=None)
-    except: pass
+    except Exception: pass
 
     await callback.bot.send_message(admin_id, "✅ Чат начат. Выберите действие:", reply_markup=get_chat_management_keyboard())
     await callback.bot.send_message(user_id, "👨‍💻 Админ на связи!", reply_markup=get_cancel_chat_keyboard())
@@ -824,7 +835,7 @@ async def end_chat(message: types.Message):
         active_chats.pop(partner, None)
         try:
             await message.bot.send_message(partner, "🛑 Чат завершен", reply_markup=get_main_keyboard())
-        except: pass
+        except Exception: pass
         await message.answer("🛑 Чат завершен", reply_markup=get_main_keyboard())
 
 # --- Обработка входящих сообщений в чате-мосте ---
@@ -838,7 +849,7 @@ async def bridge(message: types.Message):
         try:
             # Пересылаем сообщение партнеру по чату
             await message.copy_to(active_chats[sender])
-        except:
+        except Exception:
             # Обработка ошибки, если партнёр заблокировал бота
             await message.answer("❌ Пользователь заблокировал бота.")
             # Завершаем чат в одностороннем порядке
@@ -851,12 +862,16 @@ async def main():
     db_start() 
     
     # Инициализация бота
+    if not TOKEN:
+        logging.error("Токен Telegram не найден. Запуск невозможен.")
+        return
+
     bot = Bot(token=TOKEN) 
     dp = Dispatcher(storage=MemoryStorage())
 
     # Регистрация хендлеров
-    dp.message.register(cmd_start, Command("start")) # Использование Command как фильтра
-    dp.message.register(admin_panel, Command("admin")) # Использование Command как фильтра
+    dp.message.register(cmd_start, Command("start")) 
+    dp.message.register(admin_panel, Command("admin")) 
     dp.message.register(show_price, F.text == "💰 Прайс")
     dp.message.register(show_balance_menu, F.text == "💰 Баланс")
     dp.message.register(ask_numbers, F.text == "📱 Сдать номер")
@@ -894,13 +909,16 @@ async def main():
     dp.callback_query.register(start_chat, F.data.startswith("connect_"))
 
     try:
+        # Убедимся, что все ожидающие обновления удалены перед запуском (важно при переключении хостов)
         await bot.delete_webhook(drop_pending_updates=True) 
         await dp.start_polling(bot)
     except Exception as e:
-        logging.error(f"Ошибка при поллинге: {e}")
+        logging.error(f"Критическая ошибка при поллинге: {e}")
     finally:
         print("Закрытие сессии бота...")
-        await bot.session.close()
+        # Корректное закрытие сессии aiohttp, чтобы избежать ошибки "Unclosed client session"
+        if bot and bot.session:
+            await bot.session.close()
 
 if __name__ == "__main__":
     try:
