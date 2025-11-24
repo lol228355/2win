@@ -3,7 +3,7 @@ import logging
 import sqlite3
 import re
 import html
-import os # Для чтения переменной окружения
+import os
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -19,16 +19,14 @@ from aiogram.exceptions import TelegramBadRequest
 logging.basicConfig(level=logging.INFO)
 
 # --- КОНФИГУРАЦИЯ ---
-# !!! ВАЖНО: Токен считывается из переменной окружения BOT_TOKEN (для Railway)
+# Токен считывается из переменной окружения BOT_TOKEN. 
+# Если переменная не установлена (как было при ошибках), используется токен по умолчанию.
 TOKEN = os.environ.get("BOT_TOKEN") 
-if not TOKEN:
-    # Используем токен, если не смогли прочитать переменную окружения (только для локального теста)
-    # Если вы запускаете на Railway, это должно быть установлено в переменных окружения!
-    DEFAULT_TOKEN = "8389575987:AAFu7A8NSK3D6AynohVIw5QDPiYqRSNhbY"
-    TOKEN = os.environ.get("BOT_TOKEN", DEFAULT_TOKEN)
-    if TOKEN == DEFAULT_TOKEN:
-        logging.warning("Используется токен по умолчанию. На Railway настройте переменную окружения BOT_TOKEN.")
-    
+DEFAULT_TOKEN = "8389575987:AAFu7A8NSK3D6AynohVIw5QDPiYqRSNhbY"
+TOKEN = os.environ.get("BOT_TOKEN", DEFAULT_TOKEN)
+if TOKEN == DEFAULT_TOKEN:
+    logging.warning("Используется токен по умолчанию. На Railway настройте переменную окружения BOT_TOKEN.")
+
 # ВАШИ АДМИН ID
 ADMIN_IDS = [
     8227071592,  # @eza6ka
@@ -180,12 +178,10 @@ def update_ticket_status(ticket_id, status):
 async def check_subscription(bot: Bot, user_id: int) -> bool:
     for channel in REQUIRED_CHANNELS:
         try:
-            # chat_id может быть именем канала (@channel_name) или ID
             member = await bot.get_chat_member(chat_id=channel["id"], user_id=user_id)
             if member.status not in ["member", "administrator", "creator"]:
                 return False
         except TelegramBadRequest:
-            # Если бот не может получить информацию, считаем, что все ОК.
             return True
         except Exception as e:
             logging.warning(f"Ошибка проверки подписки канала {channel['id']}: {e}")
@@ -255,8 +251,9 @@ def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 # --- ХЕНДЛЕРЫ ---
+# Декораторы @Command("start"), @F.data, @F.text удалены из функций, 
+# регистрация происходит только в dp.message.register/dp.callback_query.register
 
-@Command("start")
 async def cmd_start(message: types.Message, state: FSMContext, bot: Bot):
     if message.chat.id in active_chats:
         await message.answer("❌ У вас активен диалог! Нажмите 'Закончить чат'.", reply_markup=get_cancel_chat_keyboard())
@@ -293,17 +290,14 @@ async def cmd_start(message: types.Message, state: FSMContext, bot: Bot):
     else:
         await message.answer(caption_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
-@F.data == "check_subs"
 async def cb_check_subs(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     if await check_subscription(bot, callback.from_user.id):
         await callback.message.delete()
         await callback.answer("✅ Подписка подтверждена!")
-        # Перезапуск, чтобы показать главное меню
         await cmd_start(callback.message, state, bot) 
     else:
         await callback.answer("❌ Вы не подписались на все каналы!", show_alert=True)
 
-@F.text == "💰 Прайс"
 async def show_price(message: types.Message, bot: Bot):
     if message.chat.id in active_chats: return
     if not await check_subscription(bot, message.from_user.id):
@@ -311,7 +305,6 @@ async def show_price(message: types.Message, bot: Bot):
         return
     await message.answer(config_data["price_text"], parse_mode="Markdown")
 
-@F.text == "💰 Баланс"
 async def show_balance_menu(message: types.Message, bot: Bot):
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Подпишитесь на каналы!", reply_markup=get_subs_keyboard())
@@ -326,7 +319,6 @@ async def show_balance_menu(message: types.Message, bot: Bot):
 
     await message.answer(text, reply_markup=get_balance_keyboard(balance), parse_mode="Markdown")
 
-@F.data == "request_withdrawal"
 async def request_withdrawal(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     user_id = callback.from_user.id
     username = callback.from_user.username or "Не указан"
@@ -337,7 +329,6 @@ async def request_withdrawal(callback: types.CallbackQuery, state: FSMContext, b
         await callback.answer("❌ На балансе нет средств для вывода.", show_alert=True)
         return
 
-    # Защита от дублирования запроса
     current_state = await state.get_state()
     if current_state == UserState.withdrawing.state:
         await callback.answer("⚠️ Ваш запрос на вывод уже в обработке.", show_alert=True)
@@ -368,7 +359,6 @@ async def request_withdrawal(callback: types.CallbackQuery, state: FSMContext, b
     )
     await callback.answer("Запрос отправлен!")
 
-@F.text == "📱 Сдать номер"
 async def ask_numbers(message: types.Message, state: FSMContext, bot: Bot):
     if message.chat.id in active_chats: return
 
@@ -390,7 +380,6 @@ async def ask_numbers(message: types.Message, state: FSMContext, bot: Bot):
         parse_mode="Markdown"
     )
 
-@UserState.sending_numbers
 async def receive_numbers(message: types.Message, state: FSMContext):
     # Логика команд внутри состояния
     if message.text in ["💰 Прайс", "💰 Баланс", "/start"]:
@@ -405,7 +394,6 @@ async def receive_numbers(message: types.Message, state: FSMContext):
         return
 
     # Валидация номеров
-    # Паттерн для 10 цифр, опционально с +7/7/8 в начале
     phone_pattern = re.compile(r'^(\+7|7|8)?\d{10}$') 
 
     lines = message.text.strip().split('\n')
@@ -466,7 +454,6 @@ async def receive_numbers(message: types.Message, state: FSMContext):
     await state.clear()
 
 # --- АДМИНКА И УПРАВЛЕНИЕ ---
-@Command("admin")
 async def admin_panel(message: types.Message):
     if message.from_user.id in ADMIN_IDS:
         users_list = get_all_users()
@@ -484,7 +471,6 @@ async def admin_panel(message: types.Message):
         await message.answer("⛔ У вас нет доступа к этой команде.")
 
 # --- ХЕНДЛЕР: Статистика Пользователей (Юзы) ---
-@F.data == "show_users_stats"
 async def cb_show_users_stats(callback: types.CallbackQuery, bot: Bot):
     if callback.from_user.id not in ADMIN_IDS: return
 
@@ -523,7 +509,6 @@ async def cb_show_users_stats(callback: types.CallbackQuery, bot: Bot):
         await callback.message.answer(response_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
-@F.data == "toggle_work"
 async def cb_toggle_work(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
 
@@ -549,14 +534,12 @@ async def cb_toggle_work(callback: types.CallbackQuery):
 
     await callback.answer(f"Статус изменен на: {status_text}")
 
-@F.data == "broadcast"
 async def cb_broadcast(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return
     await state.set_state(AdminState.broadcasting)
     await callback.message.answer("📢 Введите текст рассылки:")
     await callback.answer()
 
-@AdminState.broadcasting
 async def send_broadcast(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
     users_list = get_all_users()
@@ -567,45 +550,39 @@ async def send_broadcast(message: types.Message, state: FSMContext):
             await message.copy_to(uid)
             sent += 1
             await asyncio.sleep(0.05)
-        except: pass
+        except Exception: pass
     await status.edit_text(f"✅ Рассылка: {sent}/{len(users_list)}")
     await state.clear()
 
-@F.data == "edit_price"
 async def cb_edit_price(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return
     await state.set_state(AdminState.changing_price)
     await callback.message.answer("Новый прайс:")
     await callback.answer()
 
-@AdminState.changing_price
 async def set_price(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
     config_data["price_text"] = message.text
     await message.answer("✅ Прайс обновлен")
     await state.clear()
 
-@F.data == "edit_photo"
 async def cb_edit_photo(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return
     await state.set_state(AdminState.changing_photo)
     await callback.message.answer("Пришлите фото:")
     await callback.answer()
 
-@AdminState.changing_photo & F.photo
 async def set_photo(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
     config_data["menu_photo"] = message.photo[-1].file_id
     await message.answer("✅ Фото обновлено")
     await state.clear()
 
-@F.data == "close_admin"
 async def cb_close(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
     await callback.message.delete()
 
 
-@F.data == "payout_menu"
 async def cb_payout_menu(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
 
@@ -641,7 +618,6 @@ async def cb_payout_menu(callback: types.CallbackQuery):
             await callback.message.answer(f"❌ Тикет <code>{ticket_id}</code> (ID: <code>{user_id}</code>). Ошибка.", parse_mode="HTML")
 
 
-@F.data.startswith("payout_success_")
 async def cb_payout_success(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
 
@@ -678,7 +654,6 @@ async def cb_payout_success(callback: types.CallbackQuery):
     await callback.answer("✅ Выплата начислена и юзер уведомлен.")
 
 
-@F.data.startswith("payout_fail_")
 async def cb_payout_fail(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
 
@@ -702,7 +677,6 @@ async def cb_payout_fail(callback: types.CallbackQuery):
 
 # --- ПРОЦЕСС ВЫВОДА СРЕДСТВ АДМИНОМ ---
 
-@F.data.startswith("start_payout_")
 async def admin_start_payout(callback: types.CallbackQuery, state: FSMContext, dp: Dispatcher):
     if callback.from_user.id not in ADMIN_IDS: return
 
@@ -731,7 +705,6 @@ async def admin_start_payout(callback: types.CallbackQuery, state: FSMContext, d
     )
     await callback.answer()
 
-@F.data.startswith("confirm_payout_") & AdminState.payout_check_uploading
 async def admin_confirm_payout(callback: types.CallbackQuery, state: FSMContext, dp: Dispatcher):
     if callback.from_user.id not in ADMIN_IDS: return
 
@@ -778,7 +751,6 @@ async def admin_confirm_payout(callback: types.CallbackQuery, state: FSMContext,
 
 
 # --- ЧАТ И МОСТ ---
-@F.data.startswith("connect_")
 async def start_chat(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     user_id = int(callback.data.split("_")[1])
@@ -804,7 +776,6 @@ async def start_chat(callback: types.CallbackQuery, state: FSMContext):
     await callback.bot.send_message(user_id, "👨‍💻 Админ на связи!", reply_markup=get_cancel_chat_keyboard())
     await callback.answer()
 
-@F.text == "✅ Номер взят"
 async def number_taken(message: types.Message):
     admin_id = message.chat.id
     if admin_id in active_chats:
@@ -827,7 +798,6 @@ async def number_taken(message: types.Message):
         await message.answer("✅ Номер взят. Чат завершен, заявка в ожидании выплаты.", reply_markup=get_main_keyboard())
 
 
-@F.text == "❌ Закончить чат"
 async def end_chat(message: types.Message):
     sender = message.chat.id
     if sender in active_chats:
@@ -839,7 +809,6 @@ async def end_chat(message: types.Message):
         await message.answer("🛑 Чат завершен", reply_markup=get_main_keyboard())
 
 # --- Обработка входящих сообщений в чате-мосте ---
-@F.text | F.photo | F.video | F.animation | F.voice | F.sticker
 async def bridge(message: types.Message):
     # Игнорируем команды, которые могли быть отправлены (если не обработаны ранее)
     if message.text and message.text.startswith("/"): return 
@@ -869,7 +838,9 @@ async def main():
     bot = Bot(token=TOKEN) 
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Регистрация хендлеров
+    # --- РЕГИСТРАЦИЯ ХЕНДЛЕРОВ ---
+    
+    # Сообщения
     dp.message.register(cmd_start, Command("start")) 
     dp.message.register(admin_panel, Command("admin")) 
     dp.message.register(show_price, F.text == "💰 Прайс")
@@ -879,9 +850,9 @@ async def main():
     
     dp.message.register(number_taken, F.text == "✅ Номер взят")
     dp.message.register(end_chat, F.text == "❌ Закончить чат")
-    dp.message.register(bridge) 
+    dp.message.register(bridge) # Мост должен быть последним, чтобы ловить все, что не команда/кнопка
 
-
+    # Callback'и (Кнопки)
     dp.callback_query.register(cb_check_subs, F.data == "check_subs")
     dp.callback_query.register(request_withdrawal, F.data == "request_withdrawal")
     
@@ -909,14 +880,12 @@ async def main():
     dp.callback_query.register(start_chat, F.data.startswith("connect_"))
 
     try:
-        # Убедимся, что все ожидающие обновления удалены перед запуском (важно при переключении хостов)
         await bot.delete_webhook(drop_pending_updates=True) 
         await dp.start_polling(bot)
     except Exception as e:
         logging.error(f"Критическая ошибка при поллинге: {e}")
     finally:
         print("Закрытие сессии бота...")
-        # Корректное закрытие сессии aiohttp, чтобы избежать ошибки "Unclosed client session"
         if bot and bot.session:
             await bot.session.close()
 
