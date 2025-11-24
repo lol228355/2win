@@ -18,7 +18,7 @@ from aiogram.exceptions import TelegramBadRequest
 # --- 1. НАСТРОЙКА И КОНФИГУРАЦИЯ ---
 logging.basicConfig(level=logging.INFO)
 
-# !!! ВАШИ ДАННЫЕ (ИСПРАВЛЕНО: УДАЛЕНЫ ВСЕ U+00A0) !!!
+# !!! ВАШИ ДАННЫЕ !!!
 # Токен бота
 TOKEN = "8389575987:AAFu7A8NSmK3D6AynohVIw5QDPiYqRSNhbY"
 
@@ -291,7 +291,7 @@ async def cb_check_subs(callback: types.CallbackQuery, state: FSMContext, bot: B
         try: await callback.message.delete()
         except Exception: pass
         await callback.answer("✅ Подписка подтверждена!")
-        await cmd_start(callback.message, state, bot) 
+        await cmd_start(callback.message, state, bot)
     else:
         await callback.answer("❌ Вы не подписались на все каналы!", show_alert=True)
 
@@ -392,7 +392,7 @@ async def receive_numbers(message: types.Message, state: FSMContext):
         return
 
     # Валидация номеров
-    phone_pattern = re.compile(r'^(\+7|7|8)?\d{10}$') 
+    phone_pattern = re.compile(r'^(\+7|7|8)?\d{10}$')
 
     lines = message.text.strip().split('\n')
     valid_numbers = []
@@ -401,7 +401,7 @@ async def receive_numbers(message: types.Message, state: FSMContext):
     for line in lines:
         clean_line = line.strip()
         if not clean_line: continue
-                    
+
         if phone_pattern.match(clean_line):
             valid_numbers.append(clean_line)
         else:
@@ -473,20 +473,20 @@ async def cb_show_users_stats(callback: types.CallbackQuery, bot: Bot):
     if callback.from_user.id not in ADMIN_IDS: return
 
     stats = get_all_users_stats()
-    
+
     if not stats:
         await callback.answer("❌ В базе нет пользователей.")
         return
 
     await callback.answer("Подготовка списка...")
-    
+
     response_text = "📊 **Список пользователей (ТОП-100 по юзам):**\n\n"
-    
+
     for i, (user_id, orders_count, balance) in enumerate(stats[:100]):
         try:
             user_info = await bot.get_chat(user_id)
-            first_name = html.escape(user_info.first_name or "Пользователь") 
-            
+            first_name = html.escape(user_info.first_name or "Пользователь")
+
             user_line = f"{i+1}. <a href='tg://user?id={user_id}'>{first_name}</a> (<code>{user_id}</code>)\n" \
                         f"    - Юзов: **{orders_count}**\n" \
                         f"    - Баланс: {balance:.2f} $\n"
@@ -495,11 +495,11 @@ async def cb_show_users_stats(callback: types.CallbackQuery, bot: Bot):
             user_line = f"{i+1}. Пользователь (<code>{user_id}</code>)\n" \
                         f"    - Юзов: **{orders_count}**\n" \
                         f"    - Баланс: {balance:.2f} $\n"
-        
+
         if len(response_text) + len(user_line) > 4000:
             await callback.message.answer(response_text, parse_mode="HTML", disable_web_page_preview=True)
             response_text = "Продолжение списка:\n\n"
-        
+
         response_text += user_line
         await asyncio.sleep(0.02)
 
@@ -678,7 +678,7 @@ async def admin_start_payout(callback: types.CallbackQuery, state: FSMContext, d
     if callback.from_user.id not in ADMIN_IDS: return
 
     user_id = int(callback.data.split("_")[2])
-    
+
     user_state = dp.fsm.get_context(callback.bot, user_id, user_id)
     current_user_state = await user_state.get_state()
 
@@ -823,8 +823,8 @@ async def end_chat(message: types.Message):
 async def bridge(message: types.Message):
     # Ловит все, что не было обработано ранее (включая сообщения в чате)
     # Исключает обработку команд и FSM-состояний
-    if message.text and message.text.startswith("/"): return 
-    
+    if message.text and message.text.startswith("/"): return
+
     sender = message.chat.id
     if sender in active_chats:
         try:
@@ -840,19 +840,19 @@ async def bridge(message: types.Message):
 # --- 9. ГЛАВНАЯ ФУНКЦИЯ ---
 async def main():
     print("Бот запускается...")
-    db_start() 
-    
+    db_start()
+
     if not TOKEN:
         logging.error("Токен Telegram не найден. Запуск невозможен.")
         return
 
-    bot = Bot(token=TOKEN) 
+    bot = Bot(token=TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
     # --- РЕГИСТРАЦИЯ КОЛБЭКОВ ---
     dp.callback_query.register(cb_check_subs, F.data == "check_subs")
     dp.callback_query.register(start_chat, F.data.startswith("connect_")) # ГЛАВНОЕ: ловит нажатие "Принять (Начать чат)"
-    
+
     # Админские и платежные колбэки
     dp.callback_query.register(cb_toggle_work, F.data == "toggle_work")
     dp.callback_query.register(cb_broadcast, F.data == "broadcast")
@@ -868,14 +868,14 @@ async def main():
     dp.callback_query.register(admin_confirm_payout, F.data.startswith("confirm_payout_"))
 
     # --- РЕГИСТРАЦИЯ СООБЩЕНИЙ ---
-    
+
     # Основные команды и меню
-    dp.message.register(cmd_start, Command("start")) 
-    dp.message.register(admin_panel, Command("admin")) 
+    dp.message.register(cmd_start, Command("start"))
+    dp.message.register(admin_panel, Command("admin"))
     dp.message.register(show_price, F.text == "💰 Прайс")
     dp.message.register(show_balance_menu, F.text == "💰 Баланс")
     dp.message.register(ask_numbers, F.text == "📱 Сдать номер")
-    
+
     # FSM Хендлеры
     dp.message.register(receive_numbers, UserState.sending_numbers)
     dp.message.register(send_broadcast, AdminState.broadcasting)
@@ -887,7 +887,7 @@ async def main():
     # Эти хендлеры обрабатывают кнопки чата (админа и юзера)
     dp.message.register(number_taken, F.text == "✅ Номер взят")
     dp.message.register(end_chat, F.text == "❌ Закончить чат")
-    
+
     # ФУНКЦИЯ-МОСТ (Ловит все остальные сообщения)
     dp.message.register(bridge)
 
