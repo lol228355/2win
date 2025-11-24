@@ -18,14 +18,14 @@ from aiogram.exceptions import TelegramBadRequest
 # --- 1. НАСТРОЙКА И КОНФИГУРАЦИЯ ---
 logging.basicConfig(level=logging.INFO)
 
-# !!! ВАШИ ДАННЫЕ !!!
+# !!! ВАШИ ДАННЫЕ (ИСПРАВЛЕНО: УДАЛЕНЫ ВСЕ U+00A0) !!!
 # Токен бота
 TOKEN = "8389575987:AAFu7A8NSmK3D6AynohVIw5QDPiYqRSNhbY"
 
 # ВАШИ АДМИН ID
 ADMIN_IDS = [
-    8227071592,  # @eza6ka
-    8394356460  # @Dom_sot
+    8227071592,  # @eza6ka
+    8394356460   # @Dom_sot
 ]
 # !!! КОНЕЦ ВАШИХ ДАННЫХ !!!
 
@@ -37,7 +37,7 @@ REQUIRED_CHANNELS = [
     {"url": "https://t.me/+nTCkyUL-ycUxNGFi", "id": "-1000000000000", "name": "Канал 3"}
 ]
 
-PAYOUT_CHANNEL_URL = "https://t.me/mymaksi"
+PAYOUT_CHANNEL_URL = "https://tme/mymaksi" # Убедитесь, что это верная ссылка для канала выплат
 PAYOUT_AMOUNT = 5.0 # Сумма, начисляемая за один успешный тикет
 
 config_data = {
@@ -392,7 +392,7 @@ async def receive_numbers(message: types.Message, state: FSMContext):
         return
 
     # Валидация номеров
-    phone_pattern = re.compile(r'^(\+7|7|8)?\d{10}$') 
+    phone_pattern = re.compile(r'^(\+7|7|8)?\d{10}$') 
 
     lines = message.text.strip().split('\n')
     valid_numbers = []
@@ -401,7 +401,7 @@ async def receive_numbers(message: types.Message, state: FSMContext):
     for line in lines:
         clean_line = line.strip()
         if not clean_line: continue
-                    
+                    
         if phone_pattern.match(clean_line):
             valid_numbers.append(clean_line)
         else:
@@ -488,13 +488,13 @@ async def cb_show_users_stats(callback: types.CallbackQuery, bot: Bot):
             first_name = html.escape(user_info.first_name or "Пользователь") 
             
             user_line = f"{i+1}. <a href='tg://user?id={user_id}'>{first_name}</a> (<code>{user_id}</code>)\n" \
-                        f"   - Юзов: **{orders_count}**\n" \
-                        f"   - Баланс: {balance:.2f} $\n"
+                        f"    - Юзов: **{orders_count}**\n" \
+                        f"    - Баланс: {balance:.2f} $\n"
 
         except Exception:
             user_line = f"{i+1}. Пользователь (<code>{user_id}</code>)\n" \
-                        f"   - Юзов: **{orders_count}**\n" \
-                        f"   - Баланс: {balance:.2f} $\n"
+                        f"    - Юзов: **{orders_count}**\n" \
+                        f"    - Баланс: {balance:.2f} $\n"
         
         if len(response_text) + len(user_line) > 4000:
             await callback.message.answer(response_text, parse_mode="HTML", disable_web_page_preview=True)
@@ -570,8 +570,11 @@ async def cb_edit_photo(callback: types.CallbackQuery, state: FSMContext):
 
 async def set_photo(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
-    config_data["menu_photo"] = message.photo[-1].file_id
-    await message.answer("✅ Фото обновлено")
+    if message.photo:
+        config_data["menu_photo"] = message.photo[-1].file_id
+        await message.answer("✅ Фото обновлено")
+    else:
+        await message.answer("❌ Пришлите именно фотографию.")
     await state.clear()
 
 async def cb_close(callback: types.CallbackQuery):
@@ -746,7 +749,11 @@ async def admin_confirm_payout(callback: types.CallbackQuery, state: FSMContext,
 # --- 8. ЧАТ И МОСТ ---
 async def start_chat(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    user_id = int(callback.data.split("_")[1])
+    try:
+        user_id = int(callback.data.split("_")[1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка данных заявки.", show_alert=True)
+        return
 
     # ЗАЩИТА: проверяем, занят ли юзер/админ
     if user_id in active_chats:
@@ -815,8 +822,9 @@ async def end_chat(message: types.Message):
 # --- Обработка входящих сообщений в чате-мосте ---
 async def bridge(message: types.Message):
     # Ловит все, что не было обработано ранее (включая сообщения в чате)
-    if message.text and message.text.startswith("/"): return 
-     
+    # Исключает обработку команд и FSM-состояний
+    if message.text and message.text.startswith("/"): return 
+    
     sender = message.chat.id
     if sender in active_chats:
         try:
@@ -832,13 +840,13 @@ async def bridge(message: types.Message):
 # --- 9. ГЛАВНАЯ ФУНКЦИЯ ---
 async def main():
     print("Бот запускается...")
-    db_start() 
-     
+    db_start() 
+    
     if not TOKEN:
         logging.error("Токен Telegram не найден. Запуск невозможен.")
         return
 
-    bot = Bot(token=TOKEN) 
+    bot = Bot(token=TOKEN) 
     dp = Dispatcher(storage=MemoryStorage())
 
     # --- РЕГИСТРАЦИЯ КОЛБЭКОВ ---
@@ -862,8 +870,8 @@ async def main():
     # --- РЕГИСТРАЦИЯ СООБЩЕНИЙ ---
     
     # Основные команды и меню
-    dp.message.register(cmd_start, Command("start")) 
-    dp.message.register(admin_panel, Command("admin")) 
+    dp.message.register(cmd_start, Command("start")) 
+    dp.message.register(admin_panel, Command("admin")) 
     dp.message.register(show_price, F.text == "💰 Прайс")
     dp.message.register(show_balance_menu, F.text == "💰 Баланс")
     dp.message.register(ask_numbers, F.text == "📱 Сдать номер")
@@ -875,8 +883,8 @@ async def main():
     dp.message.register(set_photo, AdminState.changing_photo, F.photo)
 
 
-    # ХЕНДЛЕРЫ ЧАТ-МОСТА (ИСПРАВЛЕННЫЙ ПОРЯДОК: ДО bridge)
-    # Эти хендлеры обрабатывают кнопки чата, чтобы они не попали в receive_numbers (через bridge)
+    # ХЕНДЛЕРЫ ЧАТ-МОСТА
+    # Эти хендлеры обрабатывают кнопки чата (админа и юзера)
     dp.message.register(number_taken, F.text == "✅ Номер взят")
     dp.message.register(end_chat, F.text == "❌ Закончить чат")
     
