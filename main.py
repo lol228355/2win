@@ -306,7 +306,7 @@ async def ask_numbers(message: types.Message, state: FSMContext, bot: Bot):
         return
 
     await state.set_state(UserState.sending_numbers)
-    await message.answer("📝 <b>Отправьте номера (списком):</b>", parse_mode="HTML")
+    await message.answer("📝 <b>Отправьте номера (списком):</b>\n\nФорматы: <code>+7...</code>, <code>8...</code>, <code>7...</code>", parse_mode="HTML")
 
 async def receive_numbers(message: types.Message, state: FSMContext, bot: Bot):
     if message.text in ["/start", "💰 Прайс", "💰 Баланс", "📱 Сдать номер"]:
@@ -314,14 +314,41 @@ async def receive_numbers(message: types.Message, state: FSMContext, bot: Bot):
         await message.answer("Отмена.", reply_markup=get_main_keyboard())
         return
 
-    # Простая валидация (есть ли цифры)
-    if not re.search(r'\d', message.text):
-        await message.answer("❌ Введите корректные номера.")
+    # ВАЛИДАЦИЯ НОМЕРОВ
+    # Регулярка для проверки: +7, 7 или 8 в начале, и 10 цифр после
+    phone_pattern = re.compile(r'^(\+7|7|8)?\d{10}$')
+    
+    lines = message.text.strip().split('\n')
+    valid_numbers = []
+    bad_lines = []
+
+    for line in lines:
+        clean_line = line.strip()
+        if not clean_line: continue
+        
+        # Проверяем формат
+        if phone_pattern.match(clean_line):
+            valid_numbers.append(clean_line)
+        else:
+            bad_lines.append(clean_line)
+
+    # Если есть плохие строки - отказ
+    if bad_lines:
+        bad_text = "\n".join(bad_lines[:5])
+        await message.answer(f"❌ <b>Ошибка формата!</b>\nЭти строки не подходят:\n<code>{bad_text}</code>\n\nПринимаются только номера (11 цифр).", parse_mode="HTML")
         return
 
+    # Если вообще нет валидных номеров (например, пустой текст)
+    if not valid_numbers:
+        await message.answer("❌ Не найдено корректных номеров.")
+        return
+
+    # Если всё ок -> Сохраняем
     user_id = message.from_user.id
     increment_user_orders(user_id)
     ticket_id = add_ticket(user_id) # Создаем тикет
+    
+    final_text = "\n".join(valid_numbers)
 
     # Кнопка для админа "Проверить тикет"
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -331,7 +358,7 @@ async def receive_numbers(message: types.Message, state: FSMContext, bot: Bot):
     admin_text = (
         f"🔔 <b>НОВАЯ ЗАЯВКА #{ticket_id}</b>\n"
         f"👤: <a href='tg://user?id={user_id}'>{message.from_user.first_name}</a>\n"
-        f"📝 Номера:\n<code>{message.text}</code>"
+        f"📝 Номера:\n<code>{final_text}</code>"
     )
 
     for admin in ADMIN_IDS:
