@@ -24,7 +24,7 @@ TOKEN = "8389575987:AAFu7A8NSmK3D6AynohVIw5QDPiYqRSNhbY"
 
 # ВАШИ АДМИН ID
 ADMIN_IDS = [
-    8227071592,  # @eza6ka
+    8111456168,  # @eza6ka
     8394356460   # @Dom_sot
 ]
 # !!! КОНЕЦ ВАШИХ ДАННЫХ !!!
@@ -38,10 +38,11 @@ REQUIRED_CHANNELS = [
 ]
 
 PAYOUT_CHANNEL_URL = "https://tme/mymaksi" # Убедитесь, что это верная ссылка для канала выплат
-PAYOUT_AMOUNT = 5.0 # Сумма, начисляемая за один успешный тикет
+# --- ИЗМЕНЕНИЕ: Поминутная оплата ---
+PRICE_PER_MINUTE = 0.40 # Стоимость за одну минуту в $
 
 config_data = {
-    "price_text": f"💰 *Прайс:* {PAYOUT_AMOUNT}$\n⏳ *БезХолд* 25мин",
+    "price_text": f"💰 *Прайс:* **{PRICE_PER_MINUTE:.2f}$/минута**", # ИЗМЕНЕНИЕ
     "menu_photo": None,
     "is_work_on": False
 }
@@ -56,11 +57,13 @@ class UserState(StatesGroup):
 
 class AdminState(StatesGroup):
     changing_price = State()
+    setting_price_per_minute = State() # ИЗМЕНЕНИЕ: Новое состояние для установки цены за минуту
     changing_photo = State()
     broadcasting = State()
     payout_manage = State()
     selecting_payout_user = State()
     payout_check_uploading = State()
+    payout_set_minutes = State() # ИЗМЕНЕНИЕ: Новое состояние для ввода минут при выплате
 
 # --- 3. БД ФУНКЦИИ ---
 def db_start():
@@ -82,6 +85,7 @@ def db_start():
         user_id INTEGER,
         admin_id INTEGER,
         status TEXT, -- pending, paid, failed
+        minutes INTEGER, -- ИЗМЕНЕНИЕ: Храним минуты вместо фиксированного amount
         amount REAL,
         date TEXT,
         FOREIGN KEY (user_id) REFERENCES users(user_id)
@@ -133,15 +137,21 @@ def reset_user_balance(user_id):
 def get_pending_tickets():
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
+    # ИЗМЕНЕНИЕ: amount в pending тикете - это $0.00, мы смотрим на статус 'pending'
     cur.execute("SELECT t.id, t.user_id, u.balance FROM tickets t JOIN users u ON t.user_id = u.user_id WHERE t.status = 'pending'")
     results = cur.fetchall()
     conn.close()
     return results
 
-def update_ticket_status(ticket_id, status):
+def update_ticket_status(ticket_id, status, minutes=None, amount=None): # ИЗМЕНЕНИЕ: Добавлены minutes, amount
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
-    cur.execute("UPDATE tickets SET status = ? WHERE id = ?", (status, ticket_id))
+    if minutes is not None and amount is not None:
+        # Обновление при успешной выплате
+        cur.execute("UPDATE tickets SET status = ?, minutes = ?, amount = ? WHERE id = ?", (status, minutes, amount, ticket_id))
+    else:
+        # Обновление статуса (например, 'failed')
+        cur.execute("UPDATE tickets SET status = ? WHERE id = ?", (status, ticket_id))
     conn.commit()
     conn.close()
 
@@ -161,11 +171,11 @@ def get_all_users_stats():
     conn.close()
     return results
 
-def add_ticket(user_id, admin_id, amount):
+def add_ticket(user_id, admin_id): # ИЗМЕНЕНИЕ: Убран amount, минуты и amount будут добавлены позже
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
-    cur.execute("INSERT INTO tickets (user_id, admin_id, status, amount, date) VALUES (?, ?, 'pending', ?, datetime('now'))",
-                (user_id, admin_id, amount))
+    cur.execute("INSERT INTO tickets (user_id, admin_id, status, minutes, amount, date) VALUES (?, ?, 'pending', 0, 0.0, datetime('now'))",
+                (user_id, admin_id))
     conn.commit()
     conn.close()
 
@@ -218,7 +228,8 @@ def get_balance_keyboard(balance):
 
 def get_payout_keyboard(ticket_id):
     kb = [
-        [InlineKeyboardButton(text="✅ Отстоял (Начислить)", callback_data=f"payout_success_{ticket_id}")],
+        # ИЗМЕНЕНИЕ: Добавление минут будет происходить в новом хендлере
+        [InlineKeyboardButton(text="✅ Отстоял (Ввести минуты)", callback_data=f"payout_start_minutes_{ticket_id}")],
         [InlineKeyboardButton(text="❌ Не отстоял", callback_data=f"payout_fail_{ticket_id}")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -242,7 +253,8 @@ def get_admin_keyboard():
         [InlineKeyboardButton(text="📢 Реклама", callback_data="broadcast")],
         [InlineKeyboardButton(text="💰 Выплаты (Pending)", callback_data="payout_menu")],
         [InlineKeyboardButton(text="👥 Юзеры и юзы", callback_data="show_users_stats")],
-        [InlineKeyboardButton(text="✏️ Прайс", callback_data="edit_price"),
+        # ИЗМЕНЕНИЕ: Кнопка "✏️ Прайс" теперь ведет на установку цены за минуту
+        [InlineKeyboardButton(text="✏️ Цена/Минута", callback_data="edit_price_per_minute"),
          InlineKeyboardButton(text="🖼 Фото", callback_data="edit_photo")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_admin")]
     ]
@@ -550,16 +562,25 @@ async def send_broadcast(message: types.Message, state: FSMContext):
     await status.edit_text(f"✅ Рассылка: {sent}/{len(users_list)}")
     await state.clear()
 
-async def cb_edit_price(callback: types.CallbackQuery, state: FSMContext):
+async def cb_edit_price_per_minute(callback: types.CallbackQuery, state: FSMContext): # ИЗМЕНЕНИЕ: Новый хендлер
     if callback.from_user.id not in ADMIN_IDS: return
-    await state.set_state(AdminState.changing_price)
-    await callback.message.answer("Новый прайс:")
+    await state.set_state(AdminState.setting_price_per_minute)
+    await callback.message.answer(f"Новая цена за минуту (текущая: {PRICE_PER_MINUTE:.2f}$):")
     await callback.answer()
 
-async def set_price(message: types.Message, state: FSMContext):
+async def set_price_per_minute(message: types.Message, state: FSMContext): # ИЗМЕНЕНИЕ: Новый хендлер
+    global PRICE_PER_MINUTE
     if message.from_user.id not in ADMIN_IDS: return
-    config_data["price_text"] = message.text
-    await message.answer("✅ Прайс обновлен")
+
+    try:
+        new_price = float(message.text.replace(',', '.').strip())
+        if new_price <= 0:
+            raise ValueError
+        PRICE_PER_MINUTE = new_price
+        config_data["price_text"] = f"💰 *Прайс:* **{PRICE_PER_MINUTE:.2f}$/минута**"
+        await message.answer(f"✅ Цена за минуту обновлена: **{PRICE_PER_MINUTE:.2f}$/минута**", parse_mode="Markdown")
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите числовое значение (например, 0.40).")
     await state.clear()
 
 async def cb_edit_photo(callback: types.CallbackQuery, state: FSMContext):
@@ -616,41 +637,83 @@ async def cb_payout_menu(callback: types.CallbackQuery):
             logging.error(f"Ошибка получения инфо о юзере {user_id}: {e}")
             await callback.message.answer(f"❌ Тикет <code>{ticket_id}</code> (ID: <code>{user_id}</code>). Ошибка.", parse_mode="HTML")
 
-
-async def cb_payout_success(callback: types.CallbackQuery):
+# ИЗМЕНЕНИЕ: Новый хендлер для начала ввода минут
+async def cb_payout_start_minutes(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return
 
     ticket_id = int(callback.data.split("_")[-1])
+
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
-
-    cur.execute("SELECT user_id, amount, status FROM tickets WHERE id = ?", (ticket_id,))
-    ticket_info = cur.fetchone()
+    cur.execute("SELECT status FROM tickets WHERE id = ?", (ticket_id,))
+    status = cur.fetchone()
     conn.close()
 
-    if not ticket_info or ticket_info[2] != 'pending':
+    if not status or status[0] != 'pending':
         await callback.answer("❌ Заявка уже обработана!", show_alert=True)
         try: await callback.message.delete()
         except Exception: pass
         return
 
-    user_id, amount, _ = ticket_info
+    await state.set_state(AdminState.payout_set_minutes)
+    await state.update_data(current_ticket_id=ticket_id)
 
-    add_payout_to_balance(user_id, amount)
-    update_ticket_status(ticket_id, 'paid')
+    await callback.message.edit_text(
+        f"📝 **Тикет ID <code>{ticket_id}</code>:**\nВведите количество минут, которые отстоял пользователь:",
+        parse_mode="HTML"
+    )
+    await callback.answer("Введите минуты.")
+
+# ИЗМЕНЕНИЕ: Новый хендлер для обработки ввода минут и начисления
+async def admin_set_minutes_and_payout(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
 
     try:
-        await callback.bot.send_message(
+        minutes = int(message.text.strip())
+        if minutes <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите целое число минут (больше 0).")
+        return
+
+    data = await state.get_data()
+    ticket_id = data.get("current_ticket_id")
+
+    if ticket_id is None:
+        await message.answer("❌ Ошибка контекста тикета. Начните заново.")
+        await state.clear()
+        return
+
+    conn = sqlite3.connect('users.db')
+    cur = conn.cursor()
+
+    cur.execute("SELECT user_id, status FROM tickets WHERE id = ?", (ticket_id,))
+    ticket_info = cur.fetchone()
+    conn.close()
+
+    if not ticket_info or ticket_info[1] != 'pending':
+        await message.answer("❌ Заявка уже обработана!")
+        await state.clear()
+        return
+
+    user_id, _ = ticket_info
+    amount = minutes * PRICE_PER_MINUTE # Расчет суммы
+
+    add_payout_to_balance(user_id, amount)
+    update_ticket_status(ticket_id, 'paid', minutes, amount) # Обновление с минутами и суммой
+
+    try:
+        await message.bot.send_message(
             user_id,
-            f"🎉 **Выплата начислена!**\nВам зачислено **{amount:.2f} $** по прайсу.\n\n"
+            f"🎉 **Выплата начислена!**\nОтстой: **{minutes} мин**\nВам зачислено **{amount:.2f} $**.\n\n"
             "Вы можете запросить вывод в меню 'Баланс'.",
             parse_mode="Markdown"
         )
     except Exception as e:
         logging.error(f"Не удалось отправить уведомление юзеру {user_id} о начислении: {e}")
 
-    await callback.message.edit_text(f"✅ Тикет <code>{ticket_id}</code>: **УСПЕХ** (+{amount:.2f} $ начислено юзеру).", parse_mode="HTML")
-    await callback.answer("✅ Выплата начислена и юзер уведомлен.")
+    await message.answer(f"✅ Тикет <code>{ticket_id}</code>: **УСПЕХ** ({minutes} мин. = +{amount:.2f} $ начислено юзеру).", parse_mode="HTML", reply_markup=get_main_keyboard())
+    await state.clear()
 
 
 async def cb_payout_fail(callback: types.CallbackQuery):
@@ -789,15 +852,15 @@ async def number_taken(message: types.Message):
         user_id = active_chats.pop(admin_id)
         active_chats.pop(user_id, None)
 
-        # 1. Создаем тикет в БД
-        add_ticket(user_id, admin_id, PAYOUT_AMOUNT)
+        # 1. Создаем тикет в БД (без суммы, она будет позже)
+        add_ticket(user_id, admin_id)
 
         # 2. Уведомляем пользователя
         try:
             await message.bot.send_message(
                 user_id,
                 "✅ **Спасибо за номер!**\nВаша заявка принята и поставлена на холд.\n\n"
-                "Ожидайте вечера для проверки и начисления выплаты.",
+                "Ожидайте проверки (с указанием минут) и начисления выплаты.", # ИЗМЕНЕНИЕ
                 reply_markup=get_main_keyboard(),
                 parse_mode="Markdown"
             )
@@ -805,7 +868,7 @@ async def number_taken(message: types.Message):
             logging.error(f"Не удалось отправить уведомление юзеру {user_id} о взятии номера: {e}")
 
         # 3. Уведомляем админа
-        await message.answer("✅ Номер взят. Чат завершен, заявка в ожидании выплаты.", reply_markup=get_main_keyboard())
+        await message.answer("✅ Номер взят. Чат завершен. Создан тикет в ожидании проверки/выплаты.", reply_markup=get_main_keyboard()) # ИЗМЕНЕНИЕ
 
 
 async def end_chat(message: types.Message):
@@ -858,11 +921,11 @@ async def main():
     dp.callback_query.register(cb_broadcast, F.data == "broadcast")
     dp.callback_query.register(cb_payout_menu, F.data == "payout_menu")
     dp.callback_query.register(cb_show_users_stats, F.data == "show_users_stats")
-    dp.callback_query.register(cb_edit_price, F.data == "edit_price")
+    dp.callback_query.register(cb_edit_price_per_minute, F.data == "edit_price_per_minute") # ИЗМЕНЕНИЕ
     dp.callback_query.register(cb_edit_photo, F.data == "edit_photo")
     dp.callback_query.register(cb_close, F.data == "close_admin")
     dp.callback_query.register(request_withdrawal, F.data == "request_withdrawal")
-    dp.callback_query.register(cb_payout_success, F.data.startswith("payout_success_"))
+    dp.callback_query.register(cb_payout_start_minutes, F.data.startswith("payout_start_minutes_")) # ИЗМЕНЕНИЕ
     dp.callback_query.register(cb_payout_fail, F.data.startswith("payout_fail_"))
     dp.callback_query.register(admin_start_payout, F.data.startswith("start_payout_"))
     dp.callback_query.register(admin_confirm_payout, F.data.startswith("confirm_payout_"))
@@ -879,9 +942,9 @@ async def main():
     # FSM Хендлеры
     dp.message.register(receive_numbers, UserState.sending_numbers)
     dp.message.register(send_broadcast, AdminState.broadcasting)
-    dp.message.register(set_price, AdminState.changing_price)
+    dp.message.register(set_price_per_minute, AdminState.setting_price_per_minute) # ИЗМЕНЕНИЕ
     dp.message.register(set_photo, AdminState.changing_photo, F.photo)
-
+    dp.message.register(admin_set_minutes_and_payout, AdminState.payout_set_minutes) # ИЗМЕНЕНИЕ
 
     # ХЕНДЛЕРЫ ЧАТ-МОСТА
     # Эти хендлеры обрабатывают кнопки чата (админа и юзера)
