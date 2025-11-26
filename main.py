@@ -20,8 +20,8 @@ logging.basicConfig(level=logging.INFO)
 
 # !!! ВАШИ ДАННЫЕ !!!
 # Токен бота
-TOKEN = "8322812128:AAHyE02VILzjMnOfRpvUqWzZiw536_XnfpY"
 
+TOKEN = "8322812128:AAHyE02VILzjMnOfRpvUqWzZiw536_XnfpY"
 # ВАШИ АДМИН ID
 ADMIN_IDS = [
     8111456168,  # @eza6ka
@@ -38,29 +38,34 @@ REQUIRED_CHANNELS = [
 ]
 
 PAYOUT_CHANNEL_URL = "https://tme/mymaksi" # Убедитесь, что это верная ссылка для канала выплат
-PRICE_PER_MINUTE = 0.40 # Стоимость за одну минуту в $
+PRICE_PER_MINUTE = 0.40 # Стоимость за одну минуту в $ (ИЗМЕНЕНО)
 
 config_data = {
+    # ИЗМЕНЕНО: Прайс теперь зависит от цены за минуту
     "price_text": f"💰 *Прайс:* **{PRICE_PER_MINUTE:.2f}$/минута**",
     "menu_photo": None,
     "is_work_on": False
 }
 
+# Словарь для чат-моста: {админ_id: юзер_id, юзер_id: админ_id}
+active_chats = {}
+
 # --- 2. STATES (FSM) ---
 class UserState(StatesGroup):
     sending_numbers = State()
     withdrawing = State()
-    reporting_wrong_code = State() # Состояние для репорта о неверном коде
+    reporting_wrong_code = State() # НОВОЕ: Состояние для репорта о неверном коде
 
 class AdminState(StatesGroup):
+    # ИЗМЕНЕНО:
     setting_price_per_minute = State()
     changing_photo = State()
     broadcasting = State()
     payout_manage = State()
     selecting_payout_user = State()
-    payout_check_uploading = State() # Используется для вывода по запросу
-    payout_set_minutes = State()
-    payout_send_photo = State() # Состояние для отправки фото после начисления/повторного кода
+    payout_check_uploading = State()
+    payout_set_minutes = State() # НОВОЕ: Состояние для админа для ввода минут
+    payout_send_photo = State() # НОВОЕ: Состояние для отправки фото после начисления
 
 # --- 3. БД ФУНКЦИИ ---
 def db_start():
@@ -77,6 +82,7 @@ def db_start():
     except sqlite3.OperationalError:
         cur.execute("ALTER TABLE users ADD COLUMN balance REAL DEFAULT 0.0")
 
+    # ИЗМЕНЕНО: Добавлены поля minutes и amount
     cur.execute('''CREATE TABLE IF NOT EXISTS tickets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -134,13 +140,13 @@ def reset_user_balance(user_id):
 def get_pending_tickets():
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
-    # Ищем тикеты со статусом 'pending'
-    cur.execute("SELECT t.id, t.user_id, u.balance FROM tickets t JOIN users u ON t.user_id = u.user_id WHERE t.status = 'pending'")
+    # Ищем тикеты со статусом 'pending' или 'code_error'
+    cur.execute("SELECT t.id, t.user_id, u.balance FROM tickets t JOIN users u ON t.user_id = u.user_id WHERE t.status = 'pending' OR t.status = 'code_error'")
     results = cur.fetchall()
     conn.close()
     return results
 
-def get_ticket_info(ticket_id):
+def get_ticket_info(ticket_id): # НОВАЯ/ИЗМЕНЕННАЯ ФУНКЦИЯ
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
     cur.execute("SELECT user_id, amount, status FROM tickets WHERE id = ?", (ticket_id,))
@@ -148,7 +154,7 @@ def get_ticket_info(ticket_id):
     conn.close()
     return result
 
-def update_ticket_status(ticket_id, status, minutes=None, amount=None):
+def update_ticket_status(ticket_id, status, minutes=None, amount=None): # ИЗМЕНЕНА: принимает минуты и сумму
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
     if minutes is not None and amount is not None:
@@ -176,13 +182,13 @@ def get_all_users_stats():
     conn.close()
     return results
 
-def add_ticket(user_id, admin_id):
+def add_ticket(user_id, admin_id): # ИЗМЕНЕНА: убрана сумма, добавлены 0 для минут/суммы
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
     cur.execute("INSERT INTO tickets (user_id, admin_id, status, minutes, amount, date) VALUES (?, ?, 'pending', 0, 0.0, datetime('now'))",
                 (user_id, admin_id))
     conn.commit()
-    return cur.lastrowid
+    return cur.lastrowid # Возвращаем ID тикета
 
 
 # --- 4. ПРОВЕРКА ПОДПИСКИ ---
@@ -212,21 +218,33 @@ def get_main_keyboard():
           [KeyboardButton(text="💰 Баланс")]]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, input_field_placeholder="Меню")
 
+def get_chat_management_keyboard():
+    # Клавиатура админа в активном чате
+    kb = [
+        [KeyboardButton(text="✅ Номер взят")],
+        [KeyboardButton(text="❌ Закончить чат")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_cancel_chat_keyboard():
+    # Клавиатура юзера в активном чате
+    kb = [[KeyboardButton(text="❌ Закончить чат")]]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
 def get_balance_keyboard(balance):
     kb = []
     if balance > 0.001:
         kb.append([InlineKeyboardButton(text="💸 Вывести", callback_data="request_withdrawal")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_payout_keyboard(ticket_id):
+def get_payout_keyboard(ticket_id): # ИЗМЕНЕНО: Кнопка для ввода минут
     kb = [
         [InlineKeyboardButton(text="✅ Отстоял (Ввести минуты)", callback_data=f"payout_start_minutes_{ticket_id}")],
         [InlineKeyboardButton(text="❌ Не отстоял", callback_data=f"payout_fail_{ticket_id}")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_user_payout_keyboard(ticket_id):
-    # НОВОЕ: Кнопка для репорта о неверном коде
+def get_user_payout_keyboard(ticket_id): # НОВАЯ: Кнопка для репорта о неверном коде
     kb = [
         [InlineKeyboardButton(text="❌ Неверный код", callback_data=f"report_wrong_code_{ticket_id}")]
     ]
@@ -242,12 +260,6 @@ def get_admin_check_sent_keyboard(user_id):
         [InlineKeyboardButton(text="☑️ Чек отправлен (Подтвердить)", callback_data=f"confirm_payout_{user_id}")]
     ])
 
-def get_admin_payout_photo_keyboard(user_id, ticket_id):
-    # НОВОЕ: Кнопка для перехода к отправке фото
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🖼 Отправить фото/скриншот", callback_data=f"start_payout_photo_{user_id}_{ticket_id}")]
-    ])
-
 def get_admin_keyboard():
     status_btn_text = "🟢 START WORK (Включить)" if not config_data["is_work_on"] else "🔴 STOP WORK (Выключить)"
     status_callback = "toggle_work"
@@ -255,9 +267,9 @@ def get_admin_keyboard():
     kb = [
         [InlineKeyboardButton(text=status_btn_text, callback_data=status_callback)],
         [InlineKeyboardButton(text="📢 Реклама", callback_data="broadcast")],
-        [InlineKeyboardButton(text="💰 Выплаты (Pending)", callback_data="payout_menu")],
+        [InlineKeyboardButton(text="💰 Номера (Pending)", callback_data="payout_menu")], # ИЗМЕНЕНО
         [InlineKeyboardButton(text="👥 Юзеры и юзы", callback_data="show_users_stats")],
-        [InlineKeyboardButton(text="✏️ Цена/Минута", callback_data="edit_price_per_minute"),
+        [InlineKeyboardButton(text="✏️ Цена/Минута", callback_data="edit_price_per_minute"), # ИЗМЕНЕНО
          InlineKeyboardButton(text="🖼 Фото", callback_data="edit_photo")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_admin")]
     ]
@@ -266,6 +278,10 @@ def get_admin_keyboard():
 
 # --- 6. ХЕНДЛЕРЫ (ПОЛЬЗОВАТЕЛЬ) ---
 async def cmd_start(message: types.Message, state: FSMContext, bot: Bot):
+    if message.chat.id in active_chats:
+        await message.answer("❌ У вас активен диалог! Нажмите 'Закончить чат'.", reply_markup=get_cancel_chat_keyboard())
+        return
+
     await state.clear()
     user_id = message.from_user.id
     add_user_to_db(user_id)
@@ -307,6 +323,7 @@ async def cb_check_subs(callback: types.CallbackQuery, state: FSMContext, bot: B
         await callback.answer("❌ Вы не подписались на все каналы!", show_alert=True)
 
 async def show_price(message: types.Message, bot: Bot):
+    if message.chat.id in active_chats: return
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Подпишитесь на каналы!", reply_markup=get_subs_keyboard())
         return
@@ -367,6 +384,8 @@ async def request_withdrawal(callback: types.CallbackQuery, state: FSMContext, b
     await callback.answer("Запрос отправлен!")
 
 async def ask_numbers(message: types.Message, state: FSMContext, bot: Bot):
+    if message.chat.id in active_chats: return
+
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Подпишитесь на каналы!", reply_markup=get_subs_keyboard())
         return
@@ -387,7 +406,8 @@ async def ask_numbers(message: types.Message, state: FSMContext, bot: Bot):
     )
 
 async def receive_numbers(message: types.Message, state: FSMContext):
-    if message.text in ["💰 Прайс", "💰 Баланс", "/start"]:
+    # Логика команд внутри состояния
+    if message.text in ["💰 Прайс", "💰 Баланс", "/start", "❌ Закончить чат"]:
         await state.clear()
         await message.answer("🛑 Отмена ввода.", reply_markup=get_main_keyboard())
         return
@@ -432,20 +452,17 @@ async def receive_numbers(message: types.Message, state: FSMContext):
     add_user_to_db(user_id)
     increment_user_orders(user_id)
 
-    # Создание тикета для отображения в админке
-    ticket_id = add_ticket(user_id, admin_id=message.from_user.id) # Создаем тикет
-
     username = message.from_user.username or "NoUsername"
     safe_username = html.escape(username)
 
-    # *** Изменение: Кнопка ведет прямо к проверке тикета ***
-    admin_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡️ Проверить тикет", callback_data=f"show_ticket_{ticket_id}")]])
+    # *** Здесь формируется кнопка чат-моста ***
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Принять (Начать чат)", callback_data=f"connect_{user_id}")]])
 
     final_text = "\n".join(valid_numbers)
 
     # Отправка админу
     text_to_admin = (
-        f"🔔 <b>НОВАЯ ЗАЯВКА</b> (Тикет ID: <code>{ticket_id}</code>)\n"
+        f"🔔 <b>НОВАЯ ЗАЯВКА</b>\n"
         f"👤 <a href='tg://user?id={user_id}'>{message.from_user.first_name}</a> (@{safe_username})\n"
         f"📝 Номера:\n"
         f"<code>{final_text}</code>"
@@ -459,48 +476,14 @@ async def receive_numbers(message: types.Message, state: FSMContext):
         except Exception as e:
             logging.error(f"Ошибка отправки админу {admin_id}: {e}")
 
-    await message.answer("📨 <b>Заявка отправлена!</b>\nОжидайте проверки и начисления.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+    await message.answer("📨 <b>Заявка отправлена!</b>\nОжидайте ответа администратора.", reply_markup=get_main_keyboard(), parse_mode="HTML")
     await state.clear()
 
 # --- 7. ХЕНДЛЕРЫ (АДМИН) ---
-
-# НОВОЕ: Хендлер для показа конкретного тикета
-async def cb_show_ticket(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS: return
-
-    ticket_id = int(callback.data.split("_")[-1])
-    ticket_info = get_ticket_info(ticket_id)
-
-    if not ticket_info or ticket_info[2] != 'pending':
-        await callback.answer("❌ Заявка уже обработана или не существует!", show_alert=True)
-        try: await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception: pass
-        return
-
-    user_id = ticket_info[0]
-    _, user_balance = get_user_stats(user_id)
-    
-    current_bot = callback.bot
-    user_info = await current_bot.get_chat(user_id)
-    username = user_info.username or "NoUsername"
-    first_name = user_info.first_name or "Пользователь"
-
-    payout_text = (
-        f"ID Тикета: <code>{ticket_id}</code>\n"
-        f"Пользователь: <a href='tg://user?id={user_id}'>{first_name}</a> (@{username})\n"
-        f"Баланс: {user_balance:.2f} $\n"
-    )
-    
-    # Отправляем сообщение с полной клавиатурой проверки
-    await callback.message.answer(payout_text, reply_markup=get_payout_keyboard(ticket_id), parse_mode="HTML")
-    try: await callback.message.edit_reply_markup(reply_markup=None) # Удаляем кнопку с исходного сообщения
-    except Exception: pass
-    await callback.answer("Тикет готов к обработке.")
-
-
 async def admin_panel(message: types.Message):
     if message.from_user.id in ADMIN_IDS:
         users_list = get_all_users()
+        # Считаем количество тикетов, ожидающих проверки/выплаты (включая code_error)
         pending_count = len(get_pending_tickets())
         status_text = "🟢 ВКЛЮЧЕН" if config_data["is_work_on"] else "🔴 ВЫКЛЮЧЕН"
         await message.answer(
@@ -595,13 +578,13 @@ async def send_broadcast(message: types.Message, state: FSMContext):
     await status.edit_text(f"✅ Рассылка: {sent}/{len(users_list)}")
     await state.clear()
 
-async def cb_edit_price_per_minute(callback: types.CallbackQuery, state: FSMContext):
+async def cb_edit_price_per_minute(callback: types.CallbackQuery, state: FSMContext): # ИЗМЕНЕНО: Новая функция для цены
     if callback.from_user.id not in ADMIN_IDS: return
     await state.set_state(AdminState.setting_price_per_minute)
     await callback.message.answer(f"Новая цена за минуту (текущая: {PRICE_PER_MINUTE:.2f}$):")
     await callback.answer()
 
-async def set_price_per_minute(message: types.Message, state: FSMContext):
+async def set_price_per_minute(message: types.Message, state: FSMContext): # ИЗМЕНЕНО: Новая функция для цены
     global PRICE_PER_MINUTE
     if message.from_user.id not in ADMIN_IDS: return
 
@@ -663,6 +646,7 @@ async def cb_payout_menu(callback: types.CallbackQuery):
                 f"ID Тикета: <code>{ticket_id}</code>\n"
                 f"Пользователь: <a href='tg://user?id={user_id}'>{first_name}</a> (@{username})\n"
                 f"Баланс: {user_balance:.2f} $\n"
+                f"Статус: {'⚠️ Ошибка кода' if get_ticket_info(ticket_id)[2] == 'code_error' else '⏳ Ожидание'}"
             )
             await callback.message.answer(payout_text, reply_markup=get_payout_keyboard(ticket_id), parse_mode="HTML")
             await asyncio.sleep(0.2)
@@ -671,6 +655,7 @@ async def cb_payout_menu(callback: types.CallbackQuery):
             await callback.message.answer(f"❌ Тикет <code>{ticket_id}</code> (ID: <code>{user_id}</code>). Ошибка.", parse_mode="HTML")
 
 
+# НОВЫЙ ФЛОУ: Начало ввода минут
 async def cb_payout_start_minutes(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return
 
@@ -678,7 +663,7 @@ async def cb_payout_start_minutes(callback: types.CallbackQuery, state: FSMConte
 
     ticket_info = get_ticket_info(ticket_id)
 
-    if not ticket_info or ticket_info[2] != 'pending':
+    if not ticket_info or (ticket_info[2] != 'pending' and ticket_info[2] != 'code_error'):
         await callback.answer("❌ Заявка уже обработана!", show_alert=True)
         try: await callback.message.delete()
         except Exception: pass
@@ -687,15 +672,26 @@ async def cb_payout_start_minutes(callback: types.CallbackQuery, state: FSMConte
     await state.set_state(AdminState.payout_set_minutes)
     await state.update_data(current_ticket_id=ticket_id, current_user_id=ticket_info[0])
 
+    # Получаем юзернейм для удобства
+    current_bot = callback.bot
+    user_info = await current_bot.get_chat(ticket_info[0])
+    username = user_info.username or f"ID: {ticket_info[0]}"
+
     await callback.message.edit_text(
-        f"📝 **Тикет ID <code>{ticket_id}</code> (ID юзера: <code>{ticket_info[0]}</code>):**\nВведите количество минут, которые отстоял пользователь:",
+        f"📝 **Тикет ID <code>{ticket_id}</code> (Юзер: @{username}):**\nВведите количество минут, которые отстоял номер:",
         parse_mode="HTML"
     )
     await callback.answer("Введите минуты.")
 
-
+# НОВЫЙ ФЛОУ: Ввод минут, начисление и переход к отправке фото
 async def admin_set_minutes_and_payout(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
+    
+    # Разрешаем /admin для выхода
+    if message.text == "/admin":
+        await state.clear()
+        await message.answer("🛑 Начисление отменено. Вы вернулись в главное меню.", reply_markup=get_main_keyboard())
+        return
 
     try:
         minutes = int(message.text.strip())
@@ -715,7 +711,7 @@ async def admin_set_minutes_and_payout(message: types.Message, state: FSMContext
         return
 
     ticket_info = get_ticket_info(ticket_id)
-    if not ticket_info or ticket_info[2] != 'pending':
+    if not ticket_info or (ticket_info[2] != 'pending' and ticket_info[2] != 'code_error'):
         await message.answer("❌ Заявка уже обработана!")
         await state.clear()
         return
@@ -729,9 +725,9 @@ async def admin_set_minutes_and_payout(message: types.Message, state: FSMContext
     try:
         await message.bot.send_message(
             user_id,
-            f"🎉 **Выплата начислена!**\nОтстой: **{minutes} мин**\nВам зачислено **{amount:.2f} $**.\n\n"
-            "Если код оказался неверным, нажмите 'Неверный код' ниже.",
-            reply_markup=get_user_payout_keyboard(ticket_id), # НОВОЕ: Кнопка "Неверный код"
+            f"🎉 **Начисление выполнено!**\nОтстой: **{minutes} мин**\nВам зачислено **{amount:.2f} $**.\n\n"
+            "Ожидайте фото чека! Если код/чек оказался неверным, нажмите 'Неверный код' ниже.",
+            reply_markup=get_user_payout_keyboard(ticket_id), # Кнопка "Неверный код"
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -739,25 +735,25 @@ async def admin_set_minutes_and_payout(message: types.Message, state: FSMContext
 
     # Переход к отправке фото
     await state.set_state(AdminState.payout_send_photo)
-    await state.update_data(current_ticket_id=ticket_id, current_user_id=user_id) # Обновляем данные на всякий случай
+    await state.update_data(current_ticket_id=ticket_id, current_user_id=user_id) # Обновляем данные
 
     await message.answer(
         f"✅ Тикет <code>{ticket_id}</code>: **УСПЕХ** ({minutes} мин. = +{amount:.2f} $ начислено юзеру).\n\n"
-        "Теперь **отправьте скриншот/фото чека** (как подтверждение перевода) для пользователя. "
+        "Теперь **отправьте скриншот/фото чека** для пользователя. "
         "ИЛИ нажмите /admin для возврата в админку.",
         parse_mode="HTML"
     )
 
+# НОВЫЙ ФЛОУ: Отправка фото
 async def admin_send_payout_photo(message: types.Message, state: FSMContext):
     # Хендлер для отправки фото после начисления
     if message.from_user.id not in ADMIN_IDS: return
     
-    # ⚠️ ИСПРАВЛЕНО: Если админ прислал текст (например, /admin или просто отмену)
+    # Если админ прислал текст (например, /admin или просто отмену)
     if message.text and not message.photo:
         await state.clear()
         await message.answer("🛑 Отправка фото отменена. Вы вернулись в главное меню.", reply_markup=get_main_keyboard())
         return
-
 
     if message.photo:
         data = await state.get_data()
@@ -769,10 +765,11 @@ async def admin_send_payout_photo(message: types.Message, state: FSMContext):
             return
 
         try:
-            await message.copy_to(user_id, caption="💸 Ваш код:")
+            # Отправляем фото пользователю
+            await message.copy_to(user_id, caption="💸 Ваш код/чек:")
             await message.answer(f"✅ Фото успешно отправлено пользователю <code>{user_id}</code>.", parse_mode="HTML")
             
-            # 💡 Сброс состояния пользователя после успешной отправки кода, который был помечен как "Неверный код"
+            # Если пользователь был в состоянии репорта (wrong_code), очищаем его
             user_state_context = state.bot.get_context(user_id, user_id)
             user_current_state = await user_state_context.get_state()
             if user_current_state == UserState.reporting_wrong_code.state:
@@ -787,7 +784,6 @@ async def admin_send_payout_photo(message: types.Message, state: FSMContext):
         await message.answer("Готово. Вы вернулись в главное меню.", reply_markup=get_main_keyboard())
 
     else:
-        # Эта ветка останется только если это не фото и не текст (например, стикер/видео)
         await message.answer("❌ Это не фотография. Пожалуйста, отправьте фото чека или нажмите /admin.")
 
 
@@ -797,8 +793,7 @@ async def cb_payout_fail(callback: types.CallbackQuery):
     ticket_id = int(callback.data.split("_")[-1])
 
     ticket_info = get_ticket_info(ticket_id)
-
-    if not ticket_info or ticket_info[2] != 'pending':
+    if not ticket_info or (ticket_info[2] != 'pending' and ticket_info[2] != 'code_error'):
         await callback.answer("❌ Заявка уже обработана!", show_alert=True)
         try: await callback.message.delete()
         except Exception: pass
@@ -808,13 +803,14 @@ async def cb_payout_fail(callback: types.CallbackQuery):
     await callback.message.edit_text(f"❌ Тикет <code>{ticket_id}</code>: **ОТКАЗ** (Статус изменен на failed).", parse_mode="HTML")
     await callback.answer("❌ Статус изменен на 'Не отстоял'.")
 
-# --- ВОССТАНОВЛЕННЫЕ ФУНКЦИИ ДЛЯ ОБРАБОТКИ ВЫВОДА ПО ЗАПРОСУ ---
+# УДАЛЕНА: cb_payout_success (старый фиксированный начислен)
+# Вместо него используются cb_payout_start_minutes и admin_set_minutes_and_payout
+
 
 async def admin_start_payout(callback: types.CallbackQuery, state: FSMContext, dp: Dispatcher):
     if callback.from_user.id not in ADMIN_IDS: return
 
-    parts = callback.data.split("_")
-    user_id = int(parts[2])
+    user_id = int(callback.data.split("_")[2])
 
     user_state = dp.fsm.get_context(callback.bot, user_id, user_id)
     current_user_state = await user_state.get_state()
@@ -830,9 +826,9 @@ async def admin_start_payout(callback: types.CallbackQuery, state: FSMContext, d
 
     # Получаем актуальный баланс
     _, actual_balance = get_user_stats(user_id)
-    
+
     await callback.message.edit_text(
-        f"👉 Вы начали процесс вывода средств для ID <code>{user_id}</code>. Сумма: {actual_balance:.2f} $.\n\n"
+        f"👉 Вы начали процесс выплаты для ID <code>{user_id}</code>. Сумма: {actual_balance:.2f} $.\n\n"
         f"1. **Отправьте чек** в канал выплат: <a href='{PAYOUT_CHANNEL_URL}'>{PAYOUT_CHANNEL_URL}</a>\n"
         f"2. **Нажмите кнопку** для подтверждения.",
         reply_markup=get_admin_check_sent_keyboard(user_id),
@@ -885,7 +881,7 @@ async def admin_confirm_payout(callback: types.CallbackQuery, state: FSMContext,
     await callback.answer("✅ Выплата подтверждена и завершена.")
     await state.clear()
 
-# --- ХЕНДЛЕРЫ: Пользователь нажимает "Неверный код" ---
+# НОВЫЙ ФЛОУ: Пользователь нажимает "Неверный код"
 async def cb_report_wrong_code(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     user_id = callback.from_user.id
     ticket_id = int(callback.data.split("_")[-1])
@@ -908,7 +904,7 @@ async def cb_report_wrong_code(callback: types.CallbackQuery, state: FSMContext,
     await state.set_state(UserState.reporting_wrong_code)
 
     await callback.message.edit_text(
-        f"❌ **Код неверный.** Запрос на повторный код отправлен администратору.",
+        f"❌ **Код неверный.** Запрос на повторный код отправлен администратору. Ожидайте!",
         reply_markup=None,
         parse_mode="Markdown"
     )
@@ -933,7 +929,7 @@ async def cb_report_wrong_code(callback: types.CallbackQuery, state: FSMContext,
         except Exception as e:
             logging.error(f"Ошибка отправки репорта админу {admin_id}: {e}")
 
-# --- ХЕНДЛЕРЫ: Админ начинает повторную отправку фото (для репорта) ---
+# НОВЫЙ ФЛОУ: Админ начинает повторную отправку фото (для репорта)
 async def cb_start_payout_photo(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return
 
@@ -944,13 +940,109 @@ async def cb_start_payout_photo(callback: types.CallbackQuery, state: FSMContext
     await state.set_state(AdminState.payout_send_photo)
     await state.update_data(current_ticket_id=ticket_id, current_user_id=user_id)
 
+    # Получаем юзернейм для удобства
+    current_bot = callback.bot
+    user_info = await current_bot.get_chat(user_id)
+    username = user_info.username or f"ID: {user_id}"
+
     await callback.message.edit_text(
-        f"👉 **Повторная отправка фото** для ID <code>{user_id}</code> (Тикет <code>{ticket_id}</code>).\n\n"
+        f"👉 **Повторная отправка фото** для @{username} (Тикет <code>{ticket_id}</code>).\n\n"
         "**Отправьте скриншот/фото чека** (как подтверждение перевода) для пользователя. "
         "ИЛИ нажмите /admin для возврата в админку.",
         parse_mode="HTML"
     )
     await callback.answer("Готово к отправке фото.")
+
+# --- 8. ЧАТ И МОСТ ---
+async def start_chat(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        user_id = int(callback.data.split("_")[1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка данных заявки.", show_alert=True)
+        return
+
+    # ЗАЩИТА: проверяем, занят ли юзер/админ
+    if user_id in active_chats:
+        # Если юзер уже в чате
+        await callback.answer("⛔ Заявку уже забрал другой админ!", show_alert=True)
+        try: await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
+        return
+
+    admin_id = callback.from_user.id
+    if admin_id in active_chats:
+        # Если админ уже в чате
+        await callback.answer("⛔ Вы уже находитесь в другом активном чате!", show_alert=True)
+        return
+
+    active_chats[admin_id] = user_id
+    active_chats[user_id] = admin_id
+
+    try: await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception: pass
+
+    # Админу
+    await callback.bot.send_message(admin_id, "✅ Чат начат. Выберите действие:", reply_markup=get_chat_management_keyboard())
+    # Пользователю
+    await callback.bot.send_message(user_id, "👨‍💻 Админ на связи!", reply_markup=get_cancel_chat_keyboard())
+    await callback.answer("✅ Чат начат!")
+
+
+async def number_taken(message: types.Message):
+    # ХЕНДЛЕР СРАБОТАЕТ, ТОЛЬКО ЕСЛИ ТЕКСТ == "✅ Номер взят"
+    admin_id = message.chat.id
+    if admin_id in active_chats and admin_id in ADMIN_IDS:
+        user_id = active_chats.pop(admin_id)
+        active_chats.pop(user_id, None)
+
+        # 1. Создаем тикет в БД (Status is 'pending', amount/minutes=0)
+        ticket_id = add_ticket(user_id, admin_id)
+
+        # 2. Уведомляем пользователя
+        try:
+            await message.bot.send_message(
+                user_id,
+                "✅ **Спасибо за номер!**\nВаша заявка принята и поставлена на холд.\n"
+                f"Когда код будет готов, мы его отправим вам. ID заявки: <code>{ticket_id}</code>",
+                reply_markup=get_main_keyboard(),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление юзеру {user_id} о взятии номера: {e}")
+
+        # 3. Уведомляем админа
+        await message.answer(f"✅ Номер взят. Чат завершен. Тикет <code>{ticket_id}</code> в ожидании выплаты.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+
+
+async def end_chat(message: types.Message):
+    # ХЕНДЛЕР СРАБОТАЕТ, ТОЛЬКО ЕСЛИ ТЕКСТ == "❌ Закончить чат"
+    sender = message.chat.id
+    if sender in active_chats:
+        partner = active_chats.pop(sender)
+        active_chats.pop(partner, None)
+        try:
+            await message.bot.send_message(partner, "🛑 Чат завершен", reply_markup=get_main_keyboard())
+        except Exception: pass
+        await message.answer("🛑 Чат завершен", reply_markup=get_main_keyboard())
+
+# --- Обработка входящих сообщений в чате-мосте ---
+async def bridge(message: types.Message):
+    # Ловит все, что не было обработано ранее (включая сообщения в чате)
+    # Исключает обработку команд и FSM-состояний
+    if message.text and message.text.startswith("/"): return
+
+    sender = message.chat.id
+    if sender in active_chats:
+        try:
+            # Пересылаем сообщение партнеру по чату
+            await message.copy_to(active_chats[sender])
+        except Exception:
+            # Обработка ошибки, если партнёр заблокировал бота
+            await message.answer("❌ Пользователь заблокировал бота.")
+            # Завершаем чат в одностороннем порядке
+            partner = active_chats.pop(sender)
+            active_chats.pop(partner, None)
 
 # --- 9. ГЛАВНАЯ ФУНКЦИЯ ---
 async def main():
@@ -966,25 +1058,26 @@ async def main():
 
     # --- РЕГИСТРАЦИЯ КОЛБЭКОВ ---
     dp.callback_query.register(cb_check_subs, F.data == "check_subs")
-    dp.callback_query.register(cb_show_ticket, F.data.startswith("show_ticket_")) 
+    dp.callback_query.register(start_chat, F.data.startswith("connect_")) # ЛОВИТ: "Принять (Начать чат)"
 
     # Админские и платежные колбэки
     dp.callback_query.register(cb_toggle_work, F.data == "toggle_work")
     dp.callback_query.register(cb_broadcast, F.data == "broadcast")
-    dp.callback_query.register(cb_payout_menu, F.data == "payout_menu")
+    dp.callback_query.register(cb_payout_menu, F.data == "payout_menu") # ЛОВИТ: "Номера (Pending)"
     dp.callback_query.register(cb_show_users_stats, F.data == "show_users_stats")
-    dp.callback_query.register(cb_edit_price_per_minute, F.data == "edit_price_per_minute")
+    dp.callback_query.register(cb_edit_price_per_minute, F.data == "edit_price_per_minute") # ИЗМЕНЕНО
     dp.callback_query.register(cb_edit_photo, F.data == "edit_photo")
     dp.callback_query.register(cb_close, F.data == "close_admin")
     dp.callback_query.register(request_withdrawal, F.data == "request_withdrawal")
-    dp.callback_query.register(cb_payout_start_minutes, F.data.startswith("payout_start_minutes_"))
-    dp.callback_query.register(cb_payout_fail, F.data.startswith("payout_fail_"))
-    dp.callback_query.register(cb_report_wrong_code, F.data.startswith("report_wrong_code_")) 
-    dp.callback_query.register(cb_start_payout_photo, F.data.startswith("start_payout_photo_")) 
     
-    # Хендлеры для вывода (восстановлены)
-    dp.callback_query.register(admin_start_payout, F.data.startswith("start_payout_")) 
-    dp.callback_query.register(admin_confirm_payout, F.data.startswith("confirm_payout_")) 
+    # НОВЫЙ ФЛОУ: Минуты и фото
+    dp.callback_query.register(cb_payout_start_minutes, F.data.startswith("payout_start_minutes_")) # ЛОВИТ: "Ввести минуты"
+    dp.callback_query.register(cb_report_wrong_code, F.data.startswith("report_wrong_code_")) # ЛОВИТ: "Неверный код"
+    dp.callback_query.register(cb_start_payout_photo, F.data.startswith("start_payout_photo_")) # ЛОВИТ: "Повторно отправить фото"
+
+    dp.callback_query.register(cb_payout_fail, F.data.startswith("payout_fail_"))
+    dp.callback_query.register(admin_start_payout, F.data.startswith("start_payout_"))
+    dp.callback_query.register(admin_confirm_payout, F.data.startswith("confirm_payout_"))
 
     # --- РЕГИСТРАЦИЯ СООБЩЕНИЙ ---
 
@@ -998,20 +1091,19 @@ async def main():
     # FSM Хендлеры
     dp.message.register(receive_numbers, UserState.sending_numbers)
     dp.message.register(send_broadcast, AdminState.broadcasting)
-    dp.message.register(set_price_per_minute, AdminState.setting_price_per_minute)
+    dp.message.register(set_price_per_minute, AdminState.setting_price_per_minute) # ИЗМЕНЕНО
     dp.message.register(set_photo, AdminState.changing_photo, F.photo)
-    dp.message.register(admin_set_minutes_and_payout, AdminState.payout_set_minutes)
     
-    # ⚠️ ИСПРАВЛЕНО: Убрана регистрация с F.text, чтобы /admin работал
-    dp.message.register(admin_send_payout_photo, AdminState.payout_send_photo, F.photo) 
+    # НОВЫЕ FSM Payout Logic
+    dp.message.register(admin_set_minutes_and_payout, AdminState.payout_set_minutes) # ЛОВИТ: Ввод минут
+    dp.message.register(admin_send_payout_photo, AdminState.payout_send_photo, F.photo) # ЛОВИТ: Отправку фото
 
-    # ФУНКЦИЯ-МОСТ: Оставлена только для предотвращения "зависания"
-    async def fallback_message(message: types.Message, state: FSMContext):
-        if message.text in ["/start", "/admin"]: return
-        if await state.get_state(): return
-        await message.answer("❌ Неизвестная команда. Используйте кнопки меню.", reply_markup=get_main_keyboard())
+    # ХЕНДЛЕРЫ ЧАТ-МОСТА
+    dp.message.register(number_taken, F.text == "✅ Номер взят")
+    dp.message.register(end_chat, F.text == "❌ Закончить чат")
 
-    dp.message.register(fallback_message) # Оставлено как заглушка
+    # ФУНКЦИЯ-МОСТ (Ловит все остальные сообщения)
+    dp.message.register(bridge)
 
     # Запуск бота
     try:
