@@ -46,8 +46,6 @@ config_data = {
     "is_work_on": False
 }
 
-# --- УДАЛЕНИЕ: Словарь active_chats убран ---
-
 # --- 2. STATES (FSM) ---
 class UserState(StatesGroup):
     sending_numbers = State()
@@ -60,9 +58,9 @@ class AdminState(StatesGroup):
     broadcasting = State()
     payout_manage = State()
     selecting_payout_user = State()
-    payout_check_uploading = State()
+    payout_check_uploading = State() # Используется для вывода по запросу
     payout_set_minutes = State()
-    payout_send_photo = State() # НОВОЕ: Состояние для отправки фото после начисления
+    payout_send_photo = State() # Состояние для отправки фото после начисления/повторного кода
 
 # --- 3. БД ФУНКЦИИ ---
 def db_start():
@@ -210,12 +208,9 @@ def get_subs_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_main_keyboard():
-    # УДАЛЕНИЕ: кнопок чата
     kb = [[KeyboardButton(text="📱 Сдать номер"), KeyboardButton(text="💰 Прайс")],
           [KeyboardButton(text="💰 Баланс")]]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, input_field_placeholder="Меню")
-
-# УДАЛЕНИЕ: get_chat_management_keyboard и get_cancel_chat_keyboard
 
 def get_balance_keyboard(balance):
     kb = []
@@ -271,7 +266,6 @@ def get_admin_keyboard():
 
 # --- 6. ХЕНДЛЕРЫ (ПОЛЬЗОВАТЕЛЬ) ---
 async def cmd_start(message: types.Message, state: FSMContext, bot: Bot):
-    # УДАЛЕНИЕ: Проверки active_chats
     await state.clear()
     user_id = message.from_user.id
     add_user_to_db(user_id)
@@ -313,7 +307,6 @@ async def cb_check_subs(callback: types.CallbackQuery, state: FSMContext, bot: B
         await callback.answer("❌ Вы не подписались на все каналы!", show_alert=True)
 
 async def show_price(message: types.Message, bot: Bot):
-    # УДАЛЕНИЕ: Проверки active_chats
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Подпишитесь на каналы!", reply_markup=get_subs_keyboard())
         return
@@ -374,8 +367,6 @@ async def request_withdrawal(callback: types.CallbackQuery, state: FSMContext, b
     await callback.answer("Запрос отправлен!")
 
 async def ask_numbers(message: types.Message, state: FSMContext, bot: Bot):
-    # УДАЛЕНИЕ: Проверки active_chats
-
     if not await check_subscription(bot, message.from_user.id):
         await message.answer("❌ Подпишитесь на каналы!", reply_markup=get_subs_keyboard())
         return
@@ -396,7 +387,6 @@ async def ask_numbers(message: types.Message, state: FSMContext, bot: Bot):
     )
 
 async def receive_numbers(message: types.Message, state: FSMContext):
-    # УДАЛЕНИЕ: Проверки команд, связанных с чатом
     if message.text in ["💰 Прайс", "💰 Баланс", "/start"]:
         await state.clear()
         await message.answer("🛑 Отмена ввода.", reply_markup=get_main_keyboard())
@@ -802,6 +792,83 @@ async def cb_payout_fail(callback: types.CallbackQuery):
     await callback.message.edit_text(f"❌ Тикет <code>{ticket_id}</code>: **ОТКАЗ** (Статус изменен на failed).", parse_mode="HTML")
     await callback.answer("❌ Статус изменен на 'Не отстоял'.")
 
+# --- ВОССТАНОВЛЕННЫЕ ФУНКЦИИ ДЛЯ ОБРАБОТКИ ВЫВОДА ПО ЗАПРОСУ ---
+
+async def admin_start_payout(callback: types.CallbackQuery, state: FSMContext, dp: Dispatcher):
+    if callback.from_user.id not in ADMIN_IDS: return
+
+    parts = callback.data.split("_")
+    user_id = int(parts[2])
+
+    user_state = dp.fsm.get_context(callback.bot, user_id, user_id)
+    current_user_state = await user_state.get_state()
+
+    if current_user_state != UserState.withdrawing.state:
+        await callback.answer("❌ Пользователь отменил запрос или он уже обработан.", show_alert=True)
+        try: await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
+        return
+
+    await state.set_state(AdminState.payout_check_uploading)
+    await state.update_data(payout_user_id=user_id)
+
+    # Получаем актуальный баланс
+    _, actual_balance = get_user_stats(user_id)
+    
+    await callback.message.edit_text(
+        f"👉 Вы начали процесс вывода средств для ID <code>{user_id}</code>. Сумма: {actual_balance:.2f} $.\n\n"
+        f"1. **Отправьте чек** в канал выплат: <a href='{PAYOUT_CHANNEL_URL}'>{PAYOUT_CHANNEL_URL}</a>\n"
+        f"2. **Нажмите кнопку** для подтверждения.",
+        reply_markup=get_admin_check_sent_keyboard(user_id),
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+    await callback.answer()
+
+async def admin_confirm_payout(callback: types.CallbackQuery, state: FSMContext, dp: Dispatcher):
+    if callback.from_user.id not in ADMIN_IDS: return
+
+    data = await state.get_data()
+    user_id = data.get("payout_user_id")
+
+    if user_id is None:
+        await callback.answer("❌ Ошибка контекста. Начните процесс заново.", show_alert=True)
+        await state.clear()
+        return
+
+    _, final_balance = get_user_stats(user_id)
+
+    # 1. Обнуление баланса
+    reset_user_balance(user_id)
+
+    # 2. Уведомление пользователя о списании и кнопкой
+    payout_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💸 Забрать выплату здесь", url=PAYOUT_CHANNEL_URL)]
+    ])
+
+    try:
+        await callback.bot.send_message(
+            user_id,
+            f"🎉 **Выплата завершена!**\nС вашего баланса списано **{final_balance:.2f} $**.\n\n"
+            "Чек отправлен в канал. Нажмите кнопку, чтобы забрать выплату.",
+            reply_markup=payout_kb,
+            parse_mode="Markdown"
+        )
+        # Сброс пользовательского состояния
+        user_state = dp.fsm.get_context(callback.bot, user_id, user_id)
+        await user_state.clear()
+    except Exception as e:
+        logging.error(f"Не удалось уведомить юзера {user_id} о завершении выплаты: {e}")
+
+    # 3. Уведомление админа
+    await callback.message.edit_text(
+        f"✅ **Выплата для ID <code>{user_id}</code> завершена!**\nБаланс обнулен.",
+        parse_mode="HTML",
+        reply_markup=None
+    )
+    await callback.answer("✅ Выплата подтверждена и завершена.")
+    await state.clear()
+
 # --- ХЕНДЛЕРЫ: Пользователь нажимает "Неверный код" ---
 async def cb_report_wrong_code(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     user_id = callback.from_user.id
@@ -869,9 +936,6 @@ async def cb_start_payout_photo(callback: types.CallbackQuery, state: FSMContext
     )
     await callback.answer("Готово к отправке фото.")
 
-# --- 8. УДАЛЕНИЕ: ЧАТ И МОСТ ---
-# Удалены все хендлеры, связанные с чат-мостом: start_chat, number_taken, end_chat, bridge.
-
 # --- 9. ГЛАВНАЯ ФУНКЦИЯ ---
 async def main():
     print("Бот запускается...")
@@ -886,8 +950,7 @@ async def main():
 
     # --- РЕГИСТРАЦИЯ КОЛБЭКОВ ---
     dp.callback_query.register(cb_check_subs, F.data == "check_subs")
-    # УДАЛЕНИЕ: dp.callback_query.register(start_chat, F.data.startswith("connect_"))
-    dp.callback_query.register(cb_show_ticket, F.data.startswith("show_ticket_")) # НОВОЕ
+    dp.callback_query.register(cb_show_ticket, F.data.startswith("show_ticket_")) 
 
     # Админские и платежные колбэки
     dp.callback_query.register(cb_toggle_work, F.data == "toggle_work")
@@ -900,12 +963,12 @@ async def main():
     dp.callback_query.register(request_withdrawal, F.data == "request_withdrawal")
     dp.callback_query.register(cb_payout_start_minutes, F.data.startswith("payout_start_minutes_"))
     dp.callback_query.register(cb_payout_fail, F.data.startswith("payout_fail_"))
-    dp.callback_query.register(cb_report_wrong_code, F.data.startswith("report_wrong_code_")) # НОВОЕ
-    dp.callback_query.register(cb_start_payout_photo, F.data.startswith("start_payout_photo_")) # НОВОЕ
+    dp.callback_query.register(cb_report_wrong_code, F.data.startswith("report_wrong_code_")) 
+    dp.callback_query.register(cb_start_payout_photo, F.data.startswith("start_payout_photo_")) 
     
-    # Хендлеры для вывода (не связаны с тикетами, но связаны с балансом)
-    dp.callback_query.register(admin_start_payout, F.data.startswith("start_payout_"))
-    dp.callback_query.register(admin_confirm_payout, F.data.startswith("confirm_payout_"))
+    # Хендлеры для вывода (восстановлены)
+    dp.callback_query.register(admin_start_payout, F.data.startswith("start_payout_")) # ВОССТАНОВЛЕНО
+    dp.callback_query.register(admin_confirm_payout, F.data.startswith("confirm_payout_")) # ВОССТАНОВЛЕНО
 
     # --- РЕГИСТРАЦИЯ СООБЩЕНИЙ ---
 
@@ -922,10 +985,8 @@ async def main():
     dp.message.register(set_price_per_minute, AdminState.setting_price_per_minute)
     dp.message.register(set_photo, AdminState.changing_photo, F.photo)
     dp.message.register(admin_set_minutes_and_payout, AdminState.payout_set_minutes)
-    dp.message.register(admin_send_payout_photo, AdminState.payout_send_photo, F.photo) # НОВОЕ: Отправка фото
-    dp.message.register(admin_send_payout_photo, AdminState.payout_send_photo, F.text) # НОВОЕ: Обработка текста, если админ не отправил фото
-
-    # УДАЛЕНИЕ: Хендлеры ЧАТ-МОСТА
+    dp.message.register(admin_send_payout_photo, AdminState.payout_send_photo, F.photo) 
+    dp.message.register(admin_send_payout_photo, AdminState.payout_send_photo, F.text) 
 
     # ФУНКЦИЯ-МОСТ: Оставлена только для предотвращения "зависания"
     async def fallback_message(message: types.Message, state: FSMContext):
