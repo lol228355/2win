@@ -50,7 +50,7 @@ config_data = {
 class UserState(StatesGroup):
     sending_numbers = State()
     withdrawing = State()
-    reporting_wrong_code = State() # НОВОЕ: Состояние для репорта о неверном коде
+    reporting_wrong_code = State() # Состояние для репорта о неверном коде
 
 class AdminState(StatesGroup):
     setting_price_per_minute = State()
@@ -432,7 +432,7 @@ async def receive_numbers(message: types.Message, state: FSMContext):
     add_user_to_db(user_id)
     increment_user_orders(user_id)
 
-    # НОВОЕ: Создание тикета для отображения в админке
+    # Создание тикета для отображения в админке
     ticket_id = add_ticket(user_id, admin_id=message.from_user.id) # Создаем тикет
 
     username = message.from_user.username or "NoUsername"
@@ -749,8 +749,15 @@ async def admin_set_minutes_and_payout(message: types.Message, state: FSMContext
     )
 
 async def admin_send_payout_photo(message: types.Message, state: FSMContext):
-    # НОВОЕ: Хендлер для отправки фото после начисления
+    # Хендлер для отправки фото после начисления
     if message.from_user.id not in ADMIN_IDS: return
+    
+    # ⚠️ ИСПРАВЛЕНО: Если админ прислал текст (например, /admin или просто отмену)
+    if message.text and not message.photo:
+        await state.clear()
+        await message.answer("🛑 Отправка фото отменена. Вы вернулись в главное меню.", reply_markup=get_main_keyboard())
+        return
+
 
     if message.photo:
         data = await state.get_data()
@@ -764,6 +771,14 @@ async def admin_send_payout_photo(message: types.Message, state: FSMContext):
         try:
             await message.copy_to(user_id, caption="💸 Ваш код:")
             await message.answer(f"✅ Фото успешно отправлено пользователю <code>{user_id}</code>.", parse_mode="HTML")
+            
+            # 💡 Сброс состояния пользователя после успешной отправки кода, который был помечен как "Неверный код"
+            user_state_context = state.bot.get_context(user_id, user_id)
+            user_current_state = await user_state_context.get_state()
+            if user_current_state == UserState.reporting_wrong_code.state:
+                 await user_state_context.clear()
+                 await message.bot.send_message(user_id, "✅ Администратор отправил повторный код.")
+                 
         except Exception as e:
             logging.error(f"Не удалось отправить фото юзеру {user_id}: {e}")
             await message.answer(f"❌ Не удалось отправить фото пользователю <code>{user_id}</code>. Возможно, он заблокировал бота.", parse_mode="HTML")
@@ -772,6 +787,7 @@ async def admin_send_payout_photo(message: types.Message, state: FSMContext):
         await message.answer("Готово. Вы вернулись в главное меню.", reply_markup=get_main_keyboard())
 
     else:
+        # Эта ветка останется только если это не фото и не текст (например, стикер/видео)
         await message.answer("❌ Это не фотография. Пожалуйста, отправьте фото чека или нажмите /admin.")
 
 
@@ -967,8 +983,8 @@ async def main():
     dp.callback_query.register(cb_start_payout_photo, F.data.startswith("start_payout_photo_")) 
     
     # Хендлеры для вывода (восстановлены)
-    dp.callback_query.register(admin_start_payout, F.data.startswith("start_payout_")) # ВОССТАНОВЛЕНО
-    dp.callback_query.register(admin_confirm_payout, F.data.startswith("confirm_payout_")) # ВОССТАНОВЛЕНО
+    dp.callback_query.register(admin_start_payout, F.data.startswith("start_payout_")) 
+    dp.callback_query.register(admin_confirm_payout, F.data.startswith("confirm_payout_")) 
 
     # --- РЕГИСТРАЦИЯ СООБЩЕНИЙ ---
 
@@ -985,8 +1001,9 @@ async def main():
     dp.message.register(set_price_per_minute, AdminState.setting_price_per_minute)
     dp.message.register(set_photo, AdminState.changing_photo, F.photo)
     dp.message.register(admin_set_minutes_and_payout, AdminState.payout_set_minutes)
+    
+    # ⚠️ ИСПРАВЛЕНО: Убрана регистрация с F.text, чтобы /admin работал
     dp.message.register(admin_send_payout_photo, AdminState.payout_send_photo, F.photo) 
-    dp.message.register(admin_send_payout_photo, AdminState.payout_send_photo, F.text) 
 
     # ФУНКЦИЯ-МОСТ: Оставлена только для предотвращения "зависания"
     async def fallback_message(message: types.Message, state: FSMContext):
