@@ -4,6 +4,7 @@ import random
 import aiosqlite
 import ssl
 import aiohttp
+import time
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
@@ -29,10 +30,9 @@ class States(StatesGroup):
     waiting_for_bet = State()
     waiting_for_turn = State()
     waiting_for_withdraw = State()
-    admin_broadcast = State()
     admin_giving_balance = State()
 
-# --- РАБОТА С БАЗОЙ ДАННЫХ ---
+# --- БАЗА ДАННЫХ ---
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("""
@@ -65,200 +65,207 @@ def main_menu_kb(user_id):
     kb.adjust(1, 2, 1, 2, 1)
     return kb.as_markup()
 
-# --- ОБРАБОТЧИКИ (ХЕНДЛЕРЫ) ---
-
+# --- ОСНОВНЫЕ КОМАНДЫ ---
 @dp.message(CommandStart())
 @dp.callback_query(F.data == "start_over")
 async def cmd_start(event: types.Message | types.CallbackQuery, state: FSMContext = None):
     if state: await state.clear()
     uid = event.from_user.id
     name = event.from_user.first_name
-    
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (uid, name))
         await db.commit()
-
-    text = f"👋 Привет, {name}!\n\n💎 FLOR CASINO — честные игры и быстрые выплаты."
-    
+    text = f"👋 Привет, {name}!\n\n💎 **FLOR CASINO** — честные игры и быстрые выплаты."
     if isinstance(event, types.Message):
-        await event.answer(text, reply_markup=main_menu_kb(uid))
+        await event.answer(text, reply_markup=main_menu_kb(uid), parse_mode="Markdown")
     else:
-        await event.message.edit_text(text, reply_markup=main_menu_kb(uid))
+        await event.message.edit_text(text, reply_markup=main_menu_kb(uid), parse_mode="Markdown")
 
+# --- КОШЕЛЕК И ВЫВОД ---
 @dp.callback_query(F.data == "menu_wallet")
-async def wallet_view(callback: types.CallbackQuery):
-    u = await get_user(callback.from_user.id)
-    txt = f"💳 КОШЕЛЕК\n\nБаланс: {u['balance']:.2f}$"
+async def wallet_view(c: types.CallbackQuery):
+    u = await get_user(c.from_user.id)
+    txt = f"💳 **КОШЕЛЕК**\n\n💰 Ваш баланс: `{u['balance']:.2f}$`"
     kb = InlineKeyboardBuilder()
-    kb.button(text="🤖 АВТО-ПОПОЛНЕНИЕ", callback_data="deposit_auto")
-    kb.button(text="👨‍💻 ЧЕРЕЗ ПОДДЕРЖКУ", url="https://t.me/bolvink")
-    kb.button(text="📤 ВЫВЕСТИ", callback_data="withdraw")
+    kb.button(text="🤖 ПОПОЛНИТЬ", callback_data="deposit_auto")
+    kb.button(text="📤 ВЫВЕСТИ (CRYPTOBOT)", callback_data="withdraw")
     kb.button(text="🔙 НАЗАД", callback_data="start_over")
-    await callback.message.edit_text(txt, reply_markup=kb.adjust(1).as_markup())
+    await c.message.edit_text(txt, reply_markup=kb.adjust(1).as_markup(), parse_mode="Markdown")
 
+@dp.callback_query(F.data == "withdraw")
+async def withdraw_cmd(c: types.CallbackQuery, state: FSMContext):
+    u = await get_user(c.from_user.id)
+    if u['balance'] < 1.0:
+        return await c.answer("❌ Минимальный вывод от 1.0$", show_alert=True)
+    await c.message.answer("💸 Введите сумму для вывода в $:")
+    await state.set_state(States.waiting_for_withdraw)
+
+@dp.message(States.waiting_for_withdraw)
+async def process_withdrawal(m: types.Message, state: FSMContext):
+    try:
+        amount = float(m.text.replace(',', '.'))
+        u = await get_user(m.from_user.id)
+        if amount < 1.0 or amount > u['balance']:
+            return await m.answer("❌ Недостаточно средств или сумма меньше 1.0$")
+        
+        # Создание чека в CryptoBot
+        check = await crypto.create_check(asset='USDT', amount=amount)
+        
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, m.from_user.id))
+            await db.commit()
+            
+        await m.answer(f"✅ **Вывод выполнен!**\n\nСумма: {amount}$\nЗаберите ваш чек:\n{check.bot_check_url}", parse_mode="Markdown")
+    except Exception as e:
+        await m.answer("❌ Ошибка вывода. Проверьте баланс приложения или введите число.")
+    await state.clear()
+
+# --- ИГРОВОЙ БЛОК ---
 @dp.callback_query(F.data == "menu_games")
-async def games_list(callback: types.CallbackQuery):
+async def games_list(c: types.CallbackQuery):
     kb = InlineKeyboardBuilder()
     games = [("🎯 Дартс", "darts"), ("⚽ Футбол", "football"), ("🎲 Кубик", "dice"), ("🎳 Боулинг", "bowling"), ("🏀 Баскет", "basket"), ("💣 Мины", "mines")]
-    for n, c in games: kb.button(text=n, callback_data=f"play_{c}")
+    for n, code in games: kb.button(text=n, callback_data=f"play_{code}")
     kb.button(text="🔙 Назад", callback_data="start_over")
-    await callback.message.edit_text("🎰 ВЫБЕРИТЕ ИГРУ", reply_markup=kb.adjust(2).as_markup())
+    await c.message.edit_text("🎰 **ВЫБЕРИТЕ ИГРУ**", reply_markup=kb.adjust(2).as_markup(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("play_"))
-async def game_bet_step(callback: types.CallbackQuery, state: FSMContext):
-    game = callback.data.split("_")[1]
+async def game_start(c: types.CallbackQuery, state: FSMContext):
+    game = c.data.split("_")[1]
     await state.update_data(g=game)
-    await callback.message.answer(f"🕹 Выбрано: {game.upper()}\nВведите ставку:")
+    await c.message.answer(f"🕹 Выбрано: {game.upper()}\nВведите ставку (мин. {MIN_BET}$):")
     await state.set_state(States.waiting_for_bet)
 
 @dp.message(States.waiting_for_bet)
-async def start_game_logic(message: types.Message, state: FSMContext):
+async def handle_bet(m: types.Message, state: FSMContext):
     try:
-        bet = float(message.text.replace(',', '.'))
-    except ValueError:
-        return await message.answer("Введите число!")
+        bet = float(m.text.replace(',', '.'))
+        u = await get_user(m.from_user.id)
+        if bet < MIN_BET or bet > u['balance']: return await m.answer("❌ Недостаточно баланса!")
         
-    u = await get_user(message.from_user.id)
-    if bet < MIN_BET or bet > u['balance']: 
-        return await message.answer(f"❌ Ошибка! Мин. ставка {MIN_BET}$ или недостаточно средств.")
+        data = await state.get_data()
+        game = data['g']
+        
+        if game == "mines":
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (bet, m.from_user.id))
+                await db.commit()
+            f = ["0"]*20 + ["M"]*5
+            random.shuffle(f)
+            await state.update_data(field=f, bet=bet, opened=0, mult=1.0)
+            return await m.answer(f"💣 МИНЫ | Ставка: {bet}$", reply_markup=get_mines_kb(f, bet))
 
-    data = await state.get_data()
-    game = data['g']
-
-    if game == "mines":
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (bet, message.from_user.id))
-            await db.commit()
-        field = ["0"] * 20 + ["M"] * 5 
-        random.shuffle(field)
-        await state.update_data(field=field, bet=bet, opened=0, mult=1.0)
-        await message.answer(f"💣 MINES | Ставка: {bet:.2f}$", reply_markup=get_mines_kb(field, bet))
-        return
-
-    emo = {"darts":"🎯","football":"⚽","dice":"🎲","bowling":"🎳","basket":"🏀"}[game]
-    await state.update_data(bet=bet, emo=emo)
-    await message.answer(f"🕹 Отправь {emo} в чат!")
-    await state.set_state(States.waiting_for_turn)
+        emo = {"darts":"🎯","football":"⚽","dice":"🎲","bowling":"🎳","basket":"🏀"}[game]
+        await state.update_data(bet=bet, emo=emo)
+        await m.answer(f"🕹 Бросайте {emo}!")
+        await state.set_state(States.waiting_for_turn)
+    except: await m.answer("Введите число!")
 
 @dp.message(States.waiting_for_turn, F.dice)
-async def handle_player_turn(message: types.Message, state: FSMContext):
+async def dice_logic(m: types.Message, state: FSMContext):
     data = await state.get_data()
-    if message.dice.emoji != data.get('emo'): return
+    if m.dice.emoji != data['emo']: return
     
-    bet, emo = data['bet'], data['emo']
-    p_val = message.dice.value
-    
+    bet, p_val = data['bet'], m.dice.value
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (bet, message.from_user.id))
+        await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (bet, m.from_user.id))
         await db.commit()
 
-    await message.answer("🏦 Ход Банкира...")
-    b_msg = await message.answer_dice(emoji=emo)
-    b_val = b_msg.dice.value
-    await asyncio.sleep(4)
+    b_msg = await m.answer("🏦 Ход Банкира...")
+    await asyncio.sleep(1)
+    b_dice = await m.answer_dice(emoji=data['emo'])
+    b_val = b_dice.dice.value
+    await asyncio.sleep(3)
 
-    win = 0
-    if p_val > b_val:
-        win = bet * 1.9
-        res = f"🎉 ПОБЕДА! +{win:.2f}$"
-    elif p_val == b_val:
-        win = bet * 0.93 
-        res = f"🤝 НИЧЬЯ! Возврат (комиссия 7%): +{win:.2f}$"
-    else: 
-        res = "😔 ПРОИГРЫШ"
+    win = bet * 1.9 if p_val > b_val else (bet * 0.93 if p_val == b_val else 0)
+    res_text = "🎉 ПОБЕДА!" if win > bet else ("🤝 НИЧЬЯ (комиссия 7%)" if win > 0 else "😔 ПРОИГРЫШ")
 
     async with aiosqlite.connect(DB_NAME) as db:
-        if win > 0: await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win, message.from_user.id))
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win, m.from_user.id))
         await db.commit()
-    await message.answer(f"Итог: {p_val} vs {b_val}\n\n{res}", reply_markup=main_menu_kb(message.from_user.id))
+    
+    await m.answer(f"{res_text}\nВыигрыш: {win:.2f}$", reply_markup=main_menu_kb(m.from_user.id))
     await state.clear()
 
-# --- МИНЫ ---
+# --- КНОПКИ БОНУСА И ПРАВИЛ ---
+@dp.callback_query(F.data == "menu_bonus")
+async def get_bonus(c: types.CallbackQuery):
+    u = await get_user(c.from_user.id)
+    now = int(time.time())
+    if now - u['last_bonus'] < 86400:
+        return await c.answer("❌ Бонус доступен раз в 24 часа!", show_alert=True)
+    
+    amt = round(random.uniform(0.01, 0.05), 2)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET balance = balance + ?, last_bonus = ? WHERE user_id = ?", (amt, now, c.from_user.id))
+        await db.commit()
+    await c.answer(f"🎁 Начислено: {amt}$", show_alert=True)
+    await cmd_start(c)
+
+@dp.callback_query(F.data == "menu_rules")
+async def show_rules(c: types.CallbackQuery):
+    text = "📜 **ПРАВИЛА**\n\n1. Мин. ставка 0.1$\n2. Выигрыш: x1.9\n3. Ничья: возврат -7%\n4. Вывод: автоматический чеком."
+    await c.message.edit_text(text, reply_markup=main_menu_kb(c.from_user.id), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "menu_profile")
+async def profile_v(c: types.CallbackQuery):
+    u = await get_user(c.from_user.id)
+    await c.message.edit_text(f"👤 **ПРОФИЛЬ**\n\n🆔 ID: `{u['user_id']}`\n💰 Баланс: `{u['balance']:.2f}$`", reply_markup=main_menu_kb(c.from_user.id), parse_mode="Markdown")
+
+# --- МИНЫ (КЛАВИАТУРА) ---
 def get_mines_kb(f, win, over=False):
     kb = InlineKeyboardBuilder()
     for i, cell in enumerate(f):
-        text = ("💣" if cell == "M" else "💎") if over else ("🟦" if cell != "O" else "💎")
-        kb.button(text=text, callback_data="ignore" if over or cell=="O" else f"mine_click_{i}")
+        t = ("💣" if cell=="M" else "💎") if over else ("🟦" if cell!="O" else "💎")
+        kb.button(text=t, callback_data="ignore" if over or cell=="O" else f"mine_click_{i}")
     kb.adjust(5)
-    if not over: 
-        kb.row(types.InlineKeyboardButton(text=f"💰 ЗАБРАТЬ {win:.2f}$", callback_data="mine_cashout"))
-    else: 
-        kb.row(types.InlineKeyboardButton(text="🔙 МЕНЮ", callback_data="start_over"))
+    if not over: kb.row(types.InlineKeyboardButton(text=f"💰 ЗАБРАТЬ {win:.2f}$", callback_data="mine_cashout"))
+    else: kb.row(types.InlineKeyboardButton(text="🔙 МЕНЮ", callback_data="start_over"))
     return kb.as_markup()
 
 @dp.callback_query(F.data.startswith("mine_click_"))
-async def m_click(c: types.CallbackQuery, state: FSMContext):
+async def mine_click(c: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     idx = int(c.data.split("_")[2])
     f, b, o = data["field"], data["bet"], data["opened"]
     if f[idx] == "M":
-        await c.message.edit_text("💥 БОМБА! Проигрыш.", reply_markup=get_mines_kb(f, 0, True))
+        await c.message.edit_text("💥 БОМБА! Вы проиграли.", reply_markup=get_mines_kb(f, 0, True))
         await state.clear()
     else:
         f[idx] = "O"
         o += 1
-        m = 1.0 + (o * 0.5)
+        m = 1.0 + (o * 0.4)
         await state.update_data(field=f, opened=o, mult=m)
         await c.message.edit_text(f"💎 x{m:.2f} | Сумма: {b*m:.2f}$", reply_markup=get_mines_kb(f, b*m))
     await c.answer()
 
 @dp.callback_query(F.data == "mine_cashout")
-async def m_cash(c: types.CallbackQuery, state: FSMContext):
+async def mine_cash(c: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    w = data["bet"] * data.get("mult", 1.0)
+    win = data["bet"] * data.get("mult", 1.0)
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (w, c.from_user.id))
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win, c.from_user.id))
         await db.commit()
-    await c.message.edit_text(f"🤑 ВЫИГРЫШ: +{w:.2f}$", reply_markup=main_menu_kb(c.from_user.id))
+    await c.message.edit_text(f"🤑 ВЫИГРЫШ: +{win:.2f}$", reply_markup=main_menu_kb(c.from_user.id))
     await state.clear()
 
 @dp.callback_query(F.data == "ignore")
-async def ign(c: types.CallbackQuery): await c.answer()
-
-# --- АДМИНКА ---
-@dp.callback_query(F.data == "menu_admin")
-async def adm_v(c: types.CallbackQuery):
-    if c.from_user.id not in ADMIN_IDS: return
-    kb = InlineKeyboardBuilder().button(text="💸 ВЫДАТЬ", callback_data="adm_give").button(text="📢 РАССЫЛКА", callback_data="adm_broadcast").adjust(1)
-    await c.message.edit_text("⚙️ АДМИНКА", reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data == "adm_give")
-async def adm_g(c: types.CallbackQuery, state: FSMContext):
-    await c.message.answer("Введите ID и сумму через пробел (например: 12345 100):")
-    await state.set_state(States.admin_giving_balance)
-
-@dp.message(States.admin_giving_balance)
-async def adm_ge(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS: return
-    try:
-        uid, amt = message.text.split()
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (float(amt), int(uid)))
-            await db.commit()
-        await message.answer(f"✅ Успешно! {amt}$ выдано игроку {uid}")
-    except: 
-        await message.answer("❌ Ошибка! Формат: [ID] [СУММА]")
-    await state.clear()
+async def ignore_cb(c: types.CallbackQuery): await c.answer()
 
 # --- ЗАПУСК ---
 async def main():
     await init_db()
+    # Фикс SSL
+    ssl_c = ssl.create_default_context()
+    ssl_c.check_hostname = False
+    ssl_c.verify_mode = ssl.CERT_NONE
     
-    # Решение проблемы SSL для локального запуска
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-    
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as client_session:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_c)) as cs:
         session = AiohttpSession()
-        session._client_session = client_session
-        
+        session._client_session = cs
         bot = Bot(token=BOT_TOKEN, session=session)
-        print(">>> БОТ ВКЛЮЧЕН")
-        try:
-            await dp.start_polling(bot)
-        finally:
-            await bot.session.close()
+        print(">>> БОТ РАБОТАЕТ")
+        await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
