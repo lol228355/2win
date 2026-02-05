@@ -4,7 +4,6 @@ import random
 import aiosqlite
 import ssl
 import aiohttp
-import time
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
@@ -15,6 +14,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiocryptopay import AioCryptoPay
 
 # ⚙️ КОНФИГУРАЦИЯ
+# ⚠️ ВАЖНО: Никому не передавайте эти токены!
 BOT_TOKEN = "8595517681:AAGO7Ati4Jkm9LbzZ3LLUnw9-5xvdbqGRUc"
 CRYPTO_PAY_TOKEN = "514479:AAb64Swo8pexGV3iVkgI4MqdlYYsg22BhOZ"
 ADMIN_IDS = [8576762452, 8119723042]
@@ -25,22 +25,34 @@ logging.basicConfig(level=logging.INFO)
 crypto = AioCryptoPay(token=CRYPTO_PAY_TOKEN)
 dp = Dispatcher()
 
+# --- СОСТОЯНИЯ ---
 class States(StatesGroup):
     waiting_for_bet = State()
     waiting_for_turn = State()
     waiting_for_withdraw = State()
+    waiting_for_deposit = State() # Ожидание ввода суммы пополнения
     admin_giving_balance = State()
     admin_broadcast = State()
 
 # --- БАЗА ДАННЫХ ---
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
+        # Таблица пользователей
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY, 
                 username TEXT, 
                 balance REAL DEFAULT 0.0,
                 last_bonus INTEGER DEFAULT 0
+            )
+        """)
+        # Таблица платежей (чтобы не зачислять один чек дважды)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                invoice_id INTEGER PRIMARY KEY,
+                user_id INTEGER,
+                amount REAL,
+                status TEXT
             )
         """)
         await db.commit()
@@ -92,15 +104,82 @@ async def wallet_view(c: types.CallbackQuery):
     kb.button(text="🔙 НАЗАД", callback_data="start_over")
     await c.message.edit_text(txt, reply_markup=kb.adjust(2).as_markup(), parse_mode="Markdown")
 
+# 1. Спрашиваем сумму
 @dp.callback_query(F.data == "deposit_auto")
-async def deposit_handler(c: types.CallbackQuery):
-    # Создаем счет на 1 USDT для примера (можно добавить ввод суммы)
-    invoice = await crypto.create_invoice(asset='USDT', amount=1.0)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="💳 ОПЛАТИТЬ 1.00$", url=invoice.bot_invoice_url)
-    kb.button(text="🔙 НАЗАД", callback_data="menu_wallet")
-    await c.message.edit_text("💎 **ПОПОЛНЕНИЕ БАЛАНСА**\n\nОплатите счет ниже. Баланс зачислится после оплаты.", reply_markup=kb.adjust(1).as_markup(), parse_mode="Markdown")
+async def deposit_ask(c: types.CallbackQuery, state: FSMContext):
+    await c.message.edit_text(
+        "💸 **ПОПОЛНЕНИЕ БАЛАНСА**\n\nВведите сумму в USDT (минимум 0.1$):", 
+        parse_mode="Markdown"
+    )
+    await state.set_state(States.waiting_for_deposit)
 
+# 2. Создаем счет
+@dp.message(States.waiting_for_deposit)
+async def deposit_create_invoice(m: types.Message, state: FSMContext):
+    try:
+        amount = float(m.text.replace(',', '.'))
+        if amount < 0.1:
+            return await m.answer("❌ Минимум 0.1 USDT. Попробуйте снова.")
+        
+        # Создаем счет
+        invoice = await crypto.create_invoice(asset='USDT', amount=amount)
+        
+        kb = InlineKeyboardBuilder()
+        kb.button(text=f"💳 ОПЛАТИТЬ {amount}$", url=invoice.bot_invoice_url)
+        # Кнопка проверки
+        kb.button(text="🔄 Я ОПЛАТИЛ", callback_data=f"check_pay_{invoice.invoice_id}")
+        kb.button(text="🔙 ОТМЕНА", callback_data="menu_wallet")
+        kb.adjust(1)
+        
+        await m.answer(
+            f"🧾 **Счет создан!**\n\nСумма: `{amount}$`\nПосле оплаты нажмите кнопку проверки ниже.", 
+            reply_markup=kb.as_markup(), 
+            parse_mode="Markdown"
+        )
+        await state.clear()
+        
+    except ValueError:
+        await m.answer("❌ Пожалуйста, введите число (например: 10).")
+
+# 3. Проверяем оплату
+@dp.callback_query(F.data.startswith("check_pay_"))
+async def check_payment_handler(c: types.CallbackQuery):
+    invoice_id = int(c.data.split("_")[2])
+    
+    # Проверяем БД (защита от дублей)
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT * FROM payments WHERE invoice_id = ?", (invoice_id,)) as cursor:
+            if await cursor.fetchone():
+                return await c.answer("❌ Этот счет уже был зачислен!", show_alert=True)
+
+    # Проверяем CryptoBot
+    try:
+        invoices = await crypto.get_invoices(invoice_ids=[invoice_id])
+        if not invoices:
+            return await c.answer("❌ Счет не найден.", show_alert=True)
+            
+        invoice = invoices[0]
+        
+        if invoice.status == 'paid':
+            amount = float(invoice.amount)
+            
+            async with aiosqlite.connect(DB_NAME) as db:
+                # Начисляем
+                await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, c.from_user.id))
+                # Сохраняем как оплаченный
+                await db.execute("INSERT INTO payments (invoice_id, user_id, amount, status) VALUES (?, ?, ?, ?)", 
+                                (invoice_id, c.from_user.id, amount, 'paid'))
+                await db.commit()
+            
+            await c.message.edit_text(f"✅ **ОПЛАТА ЗАЧИСЛЕНА!**\n\n💰 +{amount}$", reply_markup=main_menu_kb(c.from_user.id), parse_mode="Markdown")
+        else:
+            await c.answer("⏳ Оплата еще не поступила. Попробуйте через минуту.", show_alert=True)
+            
+    except Exception as e:
+        logging.error(f"Error check pay: {e}")
+        await c.answer("❌ Ошибка проверки.", show_alert=True)
+
+# --- ВЫВОД ---
 @dp.callback_query(F.data == "withdraw")
 async def withdraw_cmd(c: types.CallbackQuery, state: FSMContext):
     u = await get_user(c.from_user.id)
@@ -113,14 +192,14 @@ async def process_withdrawal(m: types.Message, state: FSMContext):
     try:
         amount = float(m.text.replace(',', '.'))
         u = await get_user(m.from_user.id)
-        if amount < 1.0 or amount > u['balance']: return await m.answer("❌ Ошибка суммы")
+        if amount < 1.0 or amount > u['balance']: return await m.answer("❌ Ошибка суммы или недостаточно средств")
         
         check = await crypto.create_check(asset='USDT', amount=amount)
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, m.from_user.id))
             await db.commit()
         await m.answer(f"✅ **ВЫВОД ОФОРМЛЕН**\n\nСумма: {amount}$\nВаш чек: {check.bot_check_url}", parse_mode="Markdown")
-    except: await m.answer("❌ Введите число!")
+    except: await m.answer("❌ Введите корректное число!")
     await state.clear()
 
 # --- ИГРЫ ---
@@ -136,7 +215,7 @@ async def games_list(c: types.CallbackQuery):
 async def game_start(c: types.CallbackQuery, state: FSMContext):
     game = c.data.split("_")[1]
     await state.update_data(g=game)
-    await c.message.answer(f"🕹 Игра: {game.upper()}\nВведите вашу ставку:")
+    await c.message.answer(f"🕹 Игра: {game.upper()}\nВведите вашу ставку (мин {MIN_BET}$):")
     await state.set_state(States.waiting_for_bet)
 
 @dp.message(States.waiting_for_bet)
@@ -144,9 +223,11 @@ async def handle_bet(m: types.Message, state: FSMContext):
     try:
         bet = float(m.text.replace(',', '.'))
         u = await get_user(m.from_user.id)
-        if bet < MIN_BET or bet > u['balance']: return await m.answer("❌ Баланс!")
+        if bet < MIN_BET or bet > u['balance']: return await m.answer("❌ Неверная ставка или недостаточно средств!")
         data = await state.get_data()
         game = data['g']
+        
+        # ЛОГИКА МИН
         if game == "mines":
             async with aiosqlite.connect(DB_NAME) as db:
                 await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (bet, m.from_user.id))
@@ -155,28 +236,37 @@ async def handle_bet(m: types.Message, state: FSMContext):
             random.shuffle(f)
             await state.update_data(field=f, bet=bet, opened=0, mult=1.0)
             return await m.answer(f"💣 MINES | {bet}$", reply_markup=get_mines_kb(f, bet))
+        
+        # ЛОГИКА DICE
         emo = {"darts":"🎯","football":"⚽","dice":"🎲","bowling":"🎳","basket":"🏀"}[game]
         await state.update_data(bet=bet, emo=emo)
         await m.answer(f"🕹 Бросайте {emo}")
         await state.set_state(States.waiting_for_turn)
-    except: await m.answer("Ошибка!")
+    except: await m.answer("❌ Ошибка ввода!")
 
 @dp.message(States.waiting_for_turn, F.dice)
 async def dice_logic(m: types.Message, state: FSMContext):
     data = await state.get_data()
     if m.dice.emoji != data['emo']: return
     bet, p_val = data['bet'], m.dice.value
+    
+    # Списываем ставку перед игрой
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (bet, m.from_user.id))
         await db.commit()
+        
     await m.answer("🏦 Ход Банкира...")
     b_dice = await m.answer_dice(emoji=data['emo'])
     b_val = b_dice.dice.value
     await asyncio.sleep(4)
+    
     win = bet * 1.9 if p_val > b_val else (bet * 0.93 if p_val == b_val else 0)
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win, m.from_user.id))
-        await db.commit()
+    
+    if win > 0:
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win, m.from_user.id))
+            await db.commit()
+            
     await m.answer(f"Итог: {p_val} vs {b_val}\nВыигрыш: {win:.2f}$", reply_markup=main_menu_kb(m.from_user.id))
     await state.clear()
 
@@ -228,6 +318,7 @@ async def mine_click(c: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     idx = int(c.data.split("_")[2])
     f, b, o = data["field"], data["bet"], data["opened"]
+    
     if f[idx] == "M":
         await c.message.edit_text("💥 БОМБА!", reply_markup=get_mines_kb(f, 0, True))
         await state.clear()
@@ -252,9 +343,11 @@ async def mine_cash(c: types.CallbackQuery, state: FSMContext):
 # --- ЗАПУСК ---
 async def main():
     await init_db()
+    # Контекст для работы SSL (иногда нужен для локального запуска на Windows)
     ssl_c = ssl.create_default_context()
     ssl_c.check_hostname = False
     ssl_c.verify_mode = ssl.CERT_NONE
+    
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_c)) as cs:
         session = AiohttpSession()
         session._client_session = cs
