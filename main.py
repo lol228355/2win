@@ -172,7 +172,8 @@ async def init_db():
 
         cursor = await db.execute("SELECT COUNT(*) FROM settings")
         if (await cursor.fetchone())[0] == 0:
-             await db.execute("INSERT INTO settings (id, dice_win, dice_draw, mines_config) VALUES (1, 1.8, 0.93, ?)", (json.dumps(DEFAULT_MINES_CONFIG),))
+             # Меняем 1.8 и 0.93 на 1.5 и 0.50
+             await db.execute("INSERT INTO settings (id, dice_win, dice_draw, mines_config) VALUES (1, 1.5, 0.50, ?)", (json.dumps(DEFAULT_MINES_CONFIG),))
         else:
             cursor = await db.execute("SELECT mines_config FROM settings WHERE id = 1")
             row = await cursor.fetchone()
