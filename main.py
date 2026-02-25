@@ -17,7 +17,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiocryptopay import AioCryptoPay
 
 # ⚙️ КОНФИГУРАЦИЯ
-BOT_TOKEN = "8295201485:AAGXL2-MQeB9wdW2raDdGq3ZXkrrNGa_-XA"
+BOT_TOKEN = "8295201485:AAHenneA5CoKNz9SjDk89B33kv89-FxzKHY"
 CRYPTO_PAY_TOKEN = "538568:AAuVgbjq7EYZWydFojnRp6CvMIbYaDOZDa8"
 
 # ❗ ВАЖНО: ID админов (числа).
