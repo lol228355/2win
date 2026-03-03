@@ -36,19 +36,40 @@ REQUIRED_BIO_TEXT = "@Andcasino_bot_bot лучший бот для игр на $
 # --- ИМЯ БАЗЫ ---
 DB_NAME = "andron_casino.db"
 
-# Дефолтные настройки для мин
-# Дефолтные настройки для мин (понизили долю выдачи)
-# Чем меньше число, тем бОльшую комиссию забирает казино от математического выигрыша
+# Дефолтные настройки для мин (оптимизированные)
 DEFAULT_MINES_CONFIG = {
-    "1": 0.80, "3": 0.75, "5": 0.70, "8": 0.65,
-    "10": 0.60, "15": 0.50, "20": 0.40, "24": 0.30
+    "1": 0.95,   # 95% от математического выигрыша (было 0.80)
+    "3": 0.92,   # 92%
+    "5": 0.90,   # 90%
+    "8": 0.88,   # 88%
+    "10": 0.85,  # 85%
+    "15": 0.82,  # 82%
+    "20": 0.80,  # 80%
+    "24": 0.78   # 78%
+}
+
+# Дефолтные настройки для спортивных игр
+DEFAULT_SPORT_CONFIG = {
+    "football": 1.9,   # Коэффициент на победу в футболе
+    "basket": 1.85,    # Коэффициент на победу в баскетболе
+    "bowling": 1.88,   # Коэффициент на победу в боулинге
+    "darts": 1.92,     # Коэффициент на победу в дартс
+    "dice": 1.9        # Коэффициент на победу в кости
 }
 
 # Глобальные настройки (загружаются из БД)
 GAME_CONFIG = {
-    "dice_win": 1.5,       # Было 1.8. Теперь при ставке 10$ выигрыш будет 15$ (а не 18$)
-    "dice_draw": 0.50,     # Было 0.93. При ничьей игрок теряет половину ставки (возврат 50%)
-    "mines_config": DEFAULT_MINES_CONFIG.copy() 
+    "dice_win": 1.9,           # Победа в Dice (было 1.5)
+    "dice_draw": 0.93,         # Ничья в Dice (возврат 93%, комиссия 7%)
+    "darts_win": 1.92,         # Победа в дартс
+    "darts_draw": 0.93,        # Ничья в дартс
+    "football_win": 1.9,       # Победа в футбол
+    "football_draw": 0.93,     # Ничья в футбол
+    "basket_win": 1.85,        # Победа в баскет
+    "basket_draw": 0.93,       # Ничья в баскет
+    "bowling_win": 1.88,       # Победа в боулинг
+    "bowling_draw": 0.93,      # Ничья в боулинг
+    "mines_config": DEFAULT_MINES_CONFIG.copy()
 }
 
 # Словарь ключей для картинок
@@ -66,7 +87,8 @@ IMAGE_KEYS = {
     "game_sport": "⚽ Игра: Спорт (Заставка)",
     "res_win": "🏆 Результат: Победа",
     "res_lose": "💀 Результат: Проигрыш",
-    "res_draw": "⚖️ Результат: Ничья"
+    "res_draw": "⚖️ Результат: Ничья",
+    "admin_home": "🔐 Админ-панель"
 }
 
 logging.basicConfig(level=logging.INFO)
@@ -111,6 +133,8 @@ class States(StatesGroup):
     admin_manage_ban = State()
     admin_set_dice_win = State()
     admin_set_dice_draw = State()
+    admin_set_sport_win = State()
+    admin_set_sport_draw = State()
     admin_set_mines_specific = State()
     admin_upload_photo = State()
 
@@ -152,8 +176,16 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY,
-                dice_win REAL DEFAULT 1.8,
+                dice_win REAL DEFAULT 1.9,
                 dice_draw REAL DEFAULT 0.93,
+                darts_win REAL DEFAULT 1.92,
+                darts_draw REAL DEFAULT 0.93,
+                football_win REAL DEFAULT 1.9,
+                football_draw REAL DEFAULT 0.93,
+                basket_win REAL DEFAULT 1.85,
+                basket_draw REAL DEFAULT 0.93,
+                bowling_win REAL DEFAULT 1.88,
+                bowling_draw REAL DEFAULT 0.93,
                 mines_config TEXT
             )
         """)
@@ -165,20 +197,47 @@ async def init_db():
             )
         """)
 
+        # Проверяем и добавляем недостающие колонки
         async with db.execute("PRAGMA table_info(settings)") as cursor:
             columns = [col[1] for col in await cursor.fetchall()]
-            if 'mines_config' not in columns:
-                await db.execute("ALTER TABLE settings ADD COLUMN mines_config TEXT")
+            
+            sport_configs = [
+                ('darts_win', 'REAL DEFAULT 1.92'),
+                ('darts_draw', 'REAL DEFAULT 0.93'),
+                ('football_win', 'REAL DEFAULT 1.9'),
+                ('football_draw', 'REAL DEFAULT 0.93'),
+                ('basket_win', 'REAL DEFAULT 1.85'),
+                ('basket_draw', 'REAL DEFAULT 0.93'),
+                ('bowling_win', 'REAL DEFAULT 1.88'),
+                ('bowling_draw', 'REAL DEFAULT 0.93'),
+                ('mines_config', 'TEXT')
+            ]
+            
+            for col_name, col_type in sport_configs:
+                if col_name not in columns:
+                    await db.execute(f"ALTER TABLE settings ADD COLUMN {col_name} {col_type}")
 
+        # Проверяем, есть ли запись с id=1
         cursor = await db.execute("SELECT COUNT(*) FROM settings")
         if (await cursor.fetchone())[0] == 0:
-             # Меняем 1.8 и 0.93 на 1.5 и 0.50
-             await db.execute("INSERT INTO settings (id, dice_win, dice_draw, mines_config) VALUES (1, 1.5, 0.50, ?)", (json.dumps(DEFAULT_MINES_CONFIG),))
+            # Создаем запись с дефолтными значениями
+            await db.execute("""
+                INSERT INTO settings (
+                    id, dice_win, dice_draw, darts_win, darts_draw, 
+                    football_win, football_draw, basket_win, basket_draw, 
+                    bowling_win, bowling_draw, mines_config
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                1.9, 0.93, 1.92, 0.93, 1.9, 0.93, 1.85, 0.93, 1.88, 0.93,
+                json.dumps(DEFAULT_MINES_CONFIG)
+            ))
         else:
+            # Проверяем, есть ли mines_config
             cursor = await db.execute("SELECT mines_config FROM settings WHERE id = 1")
             row = await cursor.fetchone()
             if row and not row[0]:
-                 await db.execute("UPDATE settings SET mines_config = ? WHERE id = 1", (json.dumps(DEFAULT_MINES_CONFIG),))
+                await db.execute("UPDATE settings SET mines_config = ? WHERE id = 1", 
+                               (json.dumps(DEFAULT_MINES_CONFIG),))
         
         await db.commit()
 
@@ -201,15 +260,31 @@ async def update_db_schema():
 async def load_settings():
     global GAME_CONFIG
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT dice_win, dice_draw, mines_config FROM settings WHERE id = 1") as cursor:
+        async with db.execute("""
+            SELECT dice_win, dice_draw, darts_win, darts_draw, 
+                   football_win, football_draw, basket_win, basket_draw,
+                   bowling_win, bowling_draw, mines_config 
+            FROM settings WHERE id = 1
+        """) as cursor:
             row = await cursor.fetchone()
             if row:
                 GAME_CONFIG["dice_win"] = row[0]
                 GAME_CONFIG["dice_draw"] = row[1]
-                if row[2]:
-                    try: GAME_CONFIG["mines_config"] = json.loads(row[2])
-                    except: GAME_CONFIG["mines_config"] = DEFAULT_MINES_CONFIG.copy()
-                else: GAME_CONFIG["mines_config"] = DEFAULT_MINES_CONFIG.copy()
+                GAME_CONFIG["darts_win"] = row[2]
+                GAME_CONFIG["darts_draw"] = row[3]
+                GAME_CONFIG["football_win"] = row[4]
+                GAME_CONFIG["football_draw"] = row[5]
+                GAME_CONFIG["basket_win"] = row[6]
+                GAME_CONFIG["basket_draw"] = row[7]
+                GAME_CONFIG["bowling_win"] = row[8]
+                GAME_CONFIG["bowling_draw"] = row[9]
+                if row[10]:
+                    try: 
+                        GAME_CONFIG["mines_config"] = json.loads(row[10])
+                    except: 
+                        GAME_CONFIG["mines_config"] = DEFAULT_MINES_CONFIG.copy()
+                else: 
+                    GAME_CONFIG["mines_config"] = DEFAULT_MINES_CONFIG.copy()
 
 async def save_setting(key, value):
     global GAME_CONFIG
@@ -254,19 +329,29 @@ async def increment_games_played(user_id):
 
 async def check_referral_reward(user_id):
     user = await get_user(user_id)
-    if not user or user.get('referrer_id', 0) == 0 or user.get('referral_paid', 0) == 1: return False
+    if not user or user.get('referrer_id', 0) == 0 or user.get('referral_paid', 0) == 1: 
+        return False
     
     if user.get('games_played', 0) > 0:
         referrer_id = user.get('referrer_id', 0)
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (REFERRAL_REWARD, referrer_id))
+            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", 
+                           (REFERRAL_REWARD, referrer_id))
             await db.execute("UPDATE users SET referral_paid = 1 WHERE user_id = ?", (user_id,))
             await db.commit()
         try:
             referrer = await get_user(referrer_id)
             if referrer:
-                await bot.send_message(referrer_id, f"🎉 **Реферальная награда!**\n\nВаш реферал {user.get('username')} сыграл в игры!\nВы получили: `{REFERRAL_REWARD}$`\n💰 Баланс: `{float(referrer.get('balance', 0)) + REFERRAL_REWARD:.2f}$`")
-        except: pass
+                await bot.send_message(
+                    referrer_id, 
+                    f"🎉 **Реферальная награда!**\n\n"
+                    f"Ваш реферал {user.get('username')} сыграл в игры!\n"
+                    f"Вы получили: `{REFERRAL_REWARD}$`\n"
+                    f"💰 Баланс: `{float(referrer.get('balance', 0)) + REFERRAL_REWARD:.2f}$`",
+                    parse_mode="Markdown"
+                )
+        except: 
+            pass
         return True
     return False
 
@@ -287,45 +372,35 @@ async def save_image_file_id(key, file_id):
 
 async def send_or_edit_media(event: Union[types.Message, types.CallbackQuery], key: str, text: str, markup=None, parse_mode="Markdown"):
     """
-    Универсальная функция:
-    1. Если ключ картинки найден -> пытается отправить/заменить фото.
-    2. Если ключа нет (или фото удалено) -> пытается отправить/отредактировать текст.
-       Важно: если раньше было фото, а теперь текст, нужно удалить старое и прислать новое сообщение.
+    Универсальная функция для отправки/редактирования сообщений с фото или текстом
     """
     file_id = await get_image_file_id(key)
     chat_id = event.from_user.id if isinstance(event, types.CallbackQuery) else event.chat.id
     
-    # 1. Сценарий с картинкой
+    # Сценарий с картинкой
     if file_id:
         try:
             if isinstance(event, types.CallbackQuery):
-                # Пробуем удалить старое сообщение, чтобы прислать новое фото начисто,
-                # либо используем EditMedia (сложнее). Проще удалить и прислать, 
-                # т.к. InputMediaPhoto требует сложной структуры.
-                # Но для плавности часто лучше EditMedia. 
-                # В данном коде используется подход "удалить -> прислать" для фото, это надежнее.
                 await event.message.delete()
             await bot.send_photo(chat_id, photo=file_id, caption=text, reply_markup=markup, parse_mode=parse_mode)
             return
         except Exception as e:
             logging.error(f"Ошибка отправки фото ({key}): {e}")
     
-    # 2. Сценарий без картинки (только текст)
+    # Сценарий без картинки (только текст)
     try:
         if isinstance(event, types.CallbackQuery):
             try:
-                # Если предыдущее сообщение было с фото, его нельзя редактировать в текст.
-                # Нужно удалить и прислать новое.
                 if event.message.photo:
                     await event.message.delete()
                     await bot.send_message(chat_id, text, reply_markup=markup, parse_mode=parse_mode)
                 else:
-                    # Если было текстовое, просто редактируем
                     await event.message.edit_text(text, reply_markup=markup, parse_mode=parse_mode)
             except TelegramBadRequest:
-                # Если вдруг что-то пошло не так (например, сообщение слишком старое), удаляем и шлем новое
-                try: await event.message.delete()
-                except: pass
+                try: 
+                    await event.message.delete()
+                except: 
+                    pass
                 await bot.send_message(chat_id, text, reply_markup=markup, parse_mode=parse_mode)
         else:
             await event.answer(text, reply_markup=markup, parse_mode=parse_mode)
@@ -335,14 +410,18 @@ async def send_or_edit_media(event: Union[types.Message, types.CallbackQuery], k
 # --- ФУНКЦИИ ДЛЯ ТРАНЗАКЦИЙ ---
 async def add_transaction(user_id, trans_type, amount, invoice_id=None, check_id=None, status='pending'):
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("INSERT INTO transactions (user_id, type, amount, status, invoice_id, check_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                         (user_id, trans_type, amount, status, invoice_id, check_id, int(time.time())))
+        await db.execute(
+            "INSERT INTO transactions (user_id, type, amount, status, invoice_id, check_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+            (user_id, trans_type, amount, status, invoice_id, check_id, int(time.time()))
+        )
         await db.commit()
 
 async def update_transaction_status(invoice_id=None, check_id=None, status='completed'):
     async with aiosqlite.connect(DB_NAME) as db:
-        if invoice_id: await db.execute("UPDATE transactions SET status = ? WHERE invoice_id = ?", (status, str(invoice_id)))
-        elif check_id: await db.execute("UPDATE transactions SET status = ? WHERE check_id = ?", (status, str(check_id)))
+        if invoice_id: 
+            await db.execute("UPDATE transactions SET status = ? WHERE invoice_id = ?", (status, str(invoice_id)))
+        elif check_id: 
+            await db.execute("UPDATE transactions SET status = ? WHERE check_id = ?", (status, str(check_id)))
         await db.commit()
 
 async def get_transactions(limit=50, trans_type=None):
@@ -394,11 +473,30 @@ def admin_menu_kb():
 
 def admin_settings_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"🎲 Dice Победа: x{GAME_CONFIG['dice_win']}", callback_data="set_dice_win")
-    kb.button(text=f"⚖️ Dice Ничья: x{GAME_CONFIG['dice_draw']}", callback_data="set_dice_draw")
-    kb.button(text="💣 Настройка Мин (детально)", callback_data="adm_set_mines_menu")
+    
+    # Dice настройки
+    kb.button(text=f"🎲 DICE победа: x{GAME_CONFIG['dice_win']}", callback_data="set_dice_win")
+    kb.button(text=f"⚖️ DICE ничья: x{GAME_CONFIG['dice_draw']}", callback_data="set_dice_draw")
+    
+    # Darts настройки
+    kb.button(text=f"🎯 DARTS победа: x{GAME_CONFIG['darts_win']}", callback_data="set_darts_win")
+    kb.button(text=f"⚖️ DARTS ничья: x{GAME_CONFIG['darts_draw']}", callback_data="set_darts_draw")
+    
+    # Football настройки
+    kb.button(text=f"⚽ FOOTBALL победа: x{GAME_CONFIG['football_win']}", callback_data="set_football_win")
+    kb.button(text=f"⚖️ FOOTBALL ничья: x{GAME_CONFIG['football_draw']}", callback_data="set_football_draw")
+    
+    # Basketball настройки
+    kb.button(text=f"🏀 BASKET победа: x{GAME_CONFIG['basket_win']}", callback_data="set_basket_win")
+    kb.button(text=f"⚖️ BASKET ничья: x{GAME_CONFIG['basket_draw']}", callback_data="set_basket_draw")
+    
+    # Bowling настройки
+    kb.button(text=f"🎳 BOWLING победа: x{GAME_CONFIG['bowling_win']}", callback_data="set_bowling_win")
+    kb.button(text=f"⚖️ BOWLING ничья: x{GAME_CONFIG['bowling_draw']}", callback_data="set_bowling_draw")
+    
+    kb.button(text="💣 Настройка Мин", callback_data="adm_set_mines_menu")
     kb.button(text="🔙 Назад", callback_data="admin_home")
-    kb.adjust(1)
+    kb.adjust(2, 2, 2, 2, 2, 1, 1)
     return kb.as_markup()
 
 def admin_mines_settings_kb():
@@ -406,7 +504,7 @@ def admin_mines_settings_kb():
     mines_options = sorted([int(k) for k in GAME_CONFIG["mines_config"].keys()])
     for count in mines_options:
         share = GAME_CONFIG["mines_config"].get(str(count), 0.9)
-        kb.button(text=f"💣 {count}м ({int(share*100)}%)", callback_data=f"set_m_share_{count}")
+        kb.button(text=f"💣 {count} мин ({int(share*100)}%)", callback_data=f"set_m_share_{count}")
     kb.button(text="🔙 Назад", callback_data="adm_settings")
     kb.adjust(2)
     return kb.as_markup()
@@ -430,25 +528,27 @@ def admin_images_kb():
 @dp.message(CommandStart())
 @dp.callback_query(F.data == "start_over")
 async def cmd_start(event: types.Message | types.CallbackQuery, state: FSMContext = None, command: CommandObject = None):
-    if state: await state.clear()
+    if state: 
+        await state.clear()
     
     uid = event.from_user.id
-    print(f"DEBUG: Пользователь зашел с ID: {uid}")
-    if uid in ADMIN_IDS:
-        print(f"DEBUG: ✅ Пользователь {uid} распознан как АДМИН")
     
-    if await is_user_banned(uid): return
+    if await is_user_banned(uid): 
+        return
     
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("SELECT is_verified FROM users WHERE user_id = ?", (uid,))
         row = await cursor.fetchone()
         if not row:
             ref = int(command.args) if isinstance(event, types.Message) and command and command.args and command.args.isdigit() else 0
-            await db.execute("INSERT INTO users (user_id, username, referrer_id, created_at) VALUES (?, ?, ?, ?)", 
-                             (uid, event.from_user.first_name, ref, int(time.time())))
+            await db.execute(
+                "INSERT INTO users (user_id, username, referrer_id, created_at) VALUES (?, ?, ?, ?)", 
+                (uid, event.from_user.first_name, ref, int(time.time()))
+            )
             await db.commit()
             is_verified = 0
-        else: is_verified = row[0]
+        else: 
+            is_verified = row[0]
 
     if not is_verified:
         options = ["🍎", "🍌", "🍒", "🍉", "🍇", "🍓"]
@@ -456,7 +556,8 @@ async def cmd_start(event: types.Message | types.CallbackQuery, state: FSMContex
         random.shuffle(options)
         await state.update_data(captcha_target=target)
         kb = InlineKeyboardBuilder()
-        for emoji in options: kb.button(text=emoji, callback_data=f"captcha_{emoji}")
+        for emoji in options: 
+            kb.button(text=emoji, callback_data=f"captcha_{emoji}")
         kb.adjust(3)
         await send_or_edit_media(event, "start", f"🤖 **ВЕРИФИКАЦИЯ**\n\nНажмите на: {target}", kb.as_markup())
         await state.set_state(States.waiting_for_captcha)
@@ -482,7 +583,8 @@ async def process_captcha(c: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "menu_profile")
 async def profile_cb(c: types.CallbackQuery):
     u = await get_user(c.from_user.id)
-    if not u: return
+    if not u: 
+        return
     
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (c.from_user.id,))
@@ -491,7 +593,8 @@ async def profile_cb(c: types.CallbackQuery):
     ref_info = ""
     if u.get('referrer_id') and u['referrer_id'] > 0:
         referrer = await get_user(u['referrer_id'])
-        if referrer: ref_info = f"👤 Реферер: `{referrer.get('username','').replace('`','')}`\n"
+        if referrer: 
+            ref_info = f"👤 Реферер: `{referrer.get('username','').replace('`','')}`\n"
     
     text = (
         f"👤 **ПРОФИЛЬ**\n\n"
@@ -559,7 +662,11 @@ async def rules_cb(c: types.CallbackQuery):
         f"• Пополнение: от `{MIN_DEPOSIT}$`\n"
         f"• Вывод: от `{MIN_WITHDRAW}$`\n\n"
         "🎮 **ИГРЫ:**\n"
-        f"• Дартс/Кубик: Победа x{GAME_CONFIG.get('dice_win', 1.8)}, Ничья x{GAME_CONFIG.get('dice_draw', 0.93)}.\n"
+        f"• DICE: Победа x{GAME_CONFIG.get('dice_win', 1.9)}, Ничья x{GAME_CONFIG.get('dice_draw', 0.93)}\n"
+        f"• DARTS: Победа x{GAME_CONFIG.get('darts_win', 1.92)}, Ничья x{GAME_CONFIG.get('darts_draw', 0.93)}\n"
+        f"• FOOTBALL: Победа x{GAME_CONFIG.get('football_win', 1.9)}, Ничья x{GAME_CONFIG.get('football_draw', 0.93)}\n"
+        f"• BASKETBALL: Победа x{GAME_CONFIG.get('basket_win', 1.85)}, Ничья x{GAME_CONFIG.get('basket_draw', 0.93)}\n"
+        f"• BOWLING: Победа x{GAME_CONFIG.get('bowling_win', 1.88)}, Ничья x{GAME_CONFIG.get('bowling_draw', 0.93)}\n"
         "• Мины: Выбирайте кол-во мин, чем больше мин, тем больше выигрыш.\n\n"
         "🎁 **БОНУС:**\n"
         "• Раз в 24 часа. Нужно иметь рекламу бота в БИО.\n\n"
@@ -578,30 +685,45 @@ async def rules_cb(c: types.CallbackQuery):
 async def bonus_cb(c: types.CallbackQuery):
     u = await get_user(c.from_user.id)
     now = int(time.time())
-    if now - u.get('last_bonus', 0) < 86400: return await c.answer("⏳ Только раз в сутки!", show_alert=True)
+    if now - u.get('last_bonus', 0) < 86400: 
+        return await c.answer("⏳ Только раз в сутки!", show_alert=True)
     
     try:
         chat = await bot.get_chat(c.from_user.id)
         if REQUIRED_BIO_TEXT.lower() not in (chat.bio or "").lower():
-            return await c.message.answer(f"❌ **Установите в БИО:**\n`{REQUIRED_BIO_TEXT}`", parse_mode="Markdown")
+            return await c.message.answer(
+                f"❌ **Установите в БИО:**\n`{REQUIRED_BIO_TEXT}`", 
+                parse_mode="Markdown"
+            )
         
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET balance = balance + ?, last_bonus = ? WHERE user_id = ?", (BONUS_AMOUNT, now, c.from_user.id))
+            await db.execute(
+                "UPDATE users SET balance = balance + ?, last_bonus = ? WHERE user_id = ?", 
+                (BONUS_AMOUNT, now, c.from_user.id)
+            )
             await db.commit()
         
         text = f"✅ **Бонус +{BONUS_AMOUNT}$**"
         kb = InlineKeyboardBuilder()
         kb.button(text="🔙 Меню", callback_data="start_over")
         await send_or_edit_media(c, "bonus", text, kb.as_markup())
-    except: await c.answer("❌ Ошибка доступа к профилю", show_alert=True)
+    except: 
+        await c.answer("❌ Ошибка доступа к профилю", show_alert=True)
 
 # --- ИГРОВОЙ БЛОК ---
 @dp.callback_query(F.data == "menu_games")
 async def games_list(c: types.CallbackQuery):
     kb = InlineKeyboardBuilder()
-    gs = [("🎯 Дартс", "darts"), ("🎲 Кубик", "dice"), ("⚽ Футбол", "football"), 
-          ("🏀 Баскет", "basket"), ("🎳 Боулинг", "bowling"), ("💣 Мины", "mines")]
-    for n, code in gs: kb.button(text=n, callback_data=f"play_{code}")
+    gs = [
+        ("🎯 Дартс", "darts"), 
+        ("🎲 Кубик", "dice"), 
+        ("⚽ Футбол", "football"), 
+        ("🏀 Баскет", "basket"), 
+        ("🎳 Боулинг", "bowling"), 
+        ("💣 Мины", "mines")
+    ]
+    for n, code in gs: 
+        kb.button(text=n, callback_data=f"play_{code}")
     kb.button(text="🔙 Назад", callback_data="start_over")
     kb.adjust(2)
     await send_or_edit_media(c, "games_menu", "🎰 **ВЫБЕРИТЕ ИГРУ**", kb.as_markup())
@@ -611,9 +733,15 @@ async def game_start(c: types.CallbackQuery, state: FSMContext):
     game = c.data.split("_")[1]
     await state.update_data(g=game)
     
-    img_key = "game_mines" if game == "mines" else "game_sport" if game in ["football", "basket"] else "game_dice"
+    # Определяем ключ картинки для игры
+    if game == "mines":
+        img_key = "game_mines"
+    elif game in ["football", "basket"]:
+        img_key = "game_sport"
+    else:
+        img_key = "game_dice"
     
-    text = f"🕹 Выбрано: **{game.upper()}**\nВведите сумму ставки:"
+    text = f"🕹 Выбрано: **{game.upper()}**\nВведите сумму ставки (мин {MIN_BET}$):"
     kb = InlineKeyboardBuilder()
     kb.button(text="🔙 Отмена", callback_data="start_over")
     
@@ -625,26 +753,41 @@ async def handle_bet(m: types.Message, state: FSMContext):
     try:
         bet = float(m.text.replace(',', '.'))
         u = await get_user(m.from_user.id)
-        if bet < MIN_BET: return await m.answer(f"❌ Мин: {MIN_BET}$")
-        if bet > float(u.get('balance', 0)): return await m.answer("❌ Недостаточно средств.")
+        if bet < MIN_BET: 
+            return await m.answer(f"❌ Мин ставка: {MIN_BET}$")
+        if bet > float(u.get('balance', 0)): 
+            return await m.answer("❌ Недостаточно средств.")
         
         data = await state.get_data()
         
         if data['g'] == "mines":
             await state.update_data(bet=bet)
             kb = InlineKeyboardBuilder()
-            for count in [1, 3, 5, 8, 10, 15, 20, 24]: kb.button(text=f"💣 {count}", callback_data=f"mines_set_{count}")
+            for count in [1, 3, 5, 8, 10, 15, 20, 24]: 
+                kb.button(text=f"💣 {count}", callback_data=f"mines_set_{count}")
             kb.adjust(4)
             kb.button(text="❌ Отмена", callback_data="start_over")
-            await send_or_edit_media(m, "game_mines", f"💣 **Mines**\nСтавка: `{bet}$`\nВыберите кол-во мин:", kb.as_markup())
+            await send_or_edit_media(
+                m, "game_mines", 
+                f"💣 **Mines**\nСтавка: `{bet}$`\nВыберите кол-во мин:", 
+                kb.as_markup()
+            )
             await state.set_state(States.waiting_for_mines_count)
             return
             
-        emo = {"darts":"🎯", "dice":"🎲", "football":"⚽", "basket":"🏀", "bowling":"🎳"}[data['g']]
+        emo_map = {
+            "darts": "🎯", 
+            "dice": "🎲", 
+            "football": "⚽", 
+            "basket": "🏀", 
+            "bowling": "🎳"
+        }
+        emo = emo_map.get(data['g'], "🎲")
         await state.update_data(bet=bet, emo=emo)
         await m.answer(f"Отправьте эмодзи {emo} для броска!")
         await state.set_state(States.waiting_for_turn)
-    except ValueError: await m.answer("❌ Введите число!")
+    except ValueError: 
+        await m.answer("❌ Введите число!")
 
 # --- МИНЫ ---
 @dp.callback_query(States.waiting_for_mines_count, F.data.startswith("mines_set_"))
@@ -673,7 +816,8 @@ def calculate_mines_coeff(opened, mines_count):
     for i in range(opened):
         safe_remaining = (total_cells - mines_count) - i
         total_remaining = total_cells - i
-        if safe_remaining <= 0: return 0
+        if safe_remaining <= 0: 
+            return 0
         chance = safe_remaining / total_remaining
         mult *= (1 / chance)
     
@@ -688,11 +832,15 @@ def get_mines_kb(f, win, over=False):
             t = "💣" if cell=="M" else "💎"
             kb.button(text=t, callback_data="ignore")
         else:
-            if cell == "O": kb.button(text="💎", callback_data="ignore")
-            else: kb.button(text="🟦", callback_data=f"m_cl_{i}")
+            if cell == "O": 
+                kb.button(text="💎", callback_data="ignore")
+            else: 
+                kb.button(text="🟦", callback_data=f"m_cl_{i}")
     kb.adjust(5)
-    if not over and win > 0: kb.row(types.InlineKeyboardButton(text=f"💰 ЗАБРАТЬ {win:.2f}$", callback_data="m_cash"))
-    elif over: kb.row(types.InlineKeyboardButton(text="🔙 МЕНЮ", callback_data="start_over"))
+    if not over and win > 0: 
+        kb.row(types.InlineKeyboardButton(text=f"💰 ЗАБРАТЬ {win:.2f}$", callback_data="m_cash"))
+    elif over: 
+        kb.row(types.InlineKeyboardButton(text="🔙 МЕНЮ", callback_data="start_over"))
     return kb.as_markup()
 
 @dp.callback_query(States.waiting_for_mines_count, F.data.startswith("m_cl_"))
@@ -702,7 +850,11 @@ async def mine_click(c: types.CallbackQuery, state: FSMContext):
     f = data["field"].copy()
     
     if f[idx] == "M":
-        await send_or_edit_media(c, "res_lose", f"💥 **ВЗРЫВ!**\nВы наткнулись на мину.", get_mines_kb(f, 0, True))
+        await send_or_edit_media(
+            c, "res_lose", 
+            f"💥 **ВЗРЫВ!**\nВы наткнулись на мину.", 
+            get_mines_kb(f, 0, True)
+        )
         await state.clear()
     else:
         f[idx] = "O"
@@ -713,10 +865,19 @@ async def mine_click(c: types.CallbackQuery, state: FSMContext):
         try:
             text = f"💎 **MINES** | x{m}\nВыигрыш: `{data['bet']*m:.2f}$`"
             if c.message.photo:
-                await c.message.edit_caption(caption=text, reply_markup=get_mines_kb(f, data['bet']*m), parse_mode="Markdown")
+                await c.message.edit_caption(
+                    caption=text, 
+                    reply_markup=get_mines_kb(f, data['bet']*m), 
+                    parse_mode="Markdown"
+                )
             else:
-                await c.message.edit_text(text, reply_markup=get_mines_kb(f, data['bet']*m), parse_mode="Markdown")
-        except: pass
+                await c.message.edit_text(
+                    text, 
+                    reply_markup=get_mines_kb(f, data['bet']*m), 
+                    parse_mode="Markdown"
+                )
+        except: 
+            pass
     await c.answer()
 
 @dp.callback_query(States.waiting_for_mines_count, F.data == "m_cash")
@@ -724,18 +885,28 @@ async def mine_cash(c: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     win = round(data["bet"] * data.get("mult", 1.0), 2)
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win, c.from_user.id))
+        await db.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id = ?", 
+            (win, c.from_user.id)
+        )
         await db.commit()
-    await send_or_edit_media(c, "res_win", f"🤑 **ВЫИГРЫШ ЗАБРАН!**\nСумма: `{win:.2f}$`", main_menu_kb(c.from_user.id))
+    await send_or_edit_media(
+        c, "res_win", 
+        f"🤑 **ВЫИГРЫШ ЗАБРАН!**\nСумма: `{win:.2f}$`", 
+        main_menu_kb(c.from_user.id)
+    )
     await state.clear()
 
 # --- DICE / СПОРТ ---
 @dp.message(States.waiting_for_turn, F.dice)
 async def dice_logic(m: types.Message, state: FSMContext):
     data = await state.get_data()
-    if m.dice.emoji != data['emo']: return
+    if m.dice.emoji != data['emo']: 
+        return
     
+    game_type = data['g']
     bet = data['bet']
+    
     await update_total_bets(m.from_user.id, bet)
     await increment_games_played(m.from_user.id)
     await check_referral_reward(m.from_user.id)
@@ -747,14 +918,29 @@ async def dice_logic(m: types.Message, state: FSMContext):
     b_dice = await m.answer_dice(emoji=data['emo'])
     await asyncio.sleep(4)
     
+    # Определяем коэффициенты в зависимости от игры
+    if game_type == "darts":
+        win_mult = GAME_CONFIG.get("darts_win", 1.92)
+        draw_mult = GAME_CONFIG.get("darts_draw", 0.93)
+    elif game_type == "football":
+        win_mult = GAME_CONFIG.get("football_win", 1.9)
+        draw_mult = GAME_CONFIG.get("football_draw", 0.93)
+    elif game_type == "basket":
+        win_mult = GAME_CONFIG.get("basket_win", 1.85)
+        draw_mult = GAME_CONFIG.get("basket_draw", 0.93)
+    elif game_type == "bowling":
+        win_mult = GAME_CONFIG.get("bowling_win", 1.88)
+        draw_mult = GAME_CONFIG.get("bowling_draw", 0.93)
+    else:  # dice
+        win_mult = GAME_CONFIG.get("dice_win", 1.9)
+        draw_mult = GAME_CONFIG.get("dice_draw", 0.93)
+    
     if m.dice.value > b_dice.dice.value:
-        mult = GAME_CONFIG.get("dice_win", 1.8)
-        win = bet * mult
+        win = bet * win_mult
         res_key = "res_win"
         res_text = "🏆 ПОБЕДА"
     elif m.dice.value == b_dice.dice.value:
-        mult = GAME_CONFIG.get("dice_draw", 0.93)
-        win = bet * mult
+        win = bet * draw_mult
         res_key = "res_draw"
         res_text = "🤝 НИЧЬЯ"
     else:
@@ -763,10 +949,17 @@ async def dice_logic(m: types.Message, state: FSMContext):
         res_text = "💀 ПРОИГРЫШ"
     
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win, m.from_user.id))
+        await db.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id = ?", 
+            (win, m.from_user.id)
+        )
         await db.commit()
     
-    text = f"**{res_text}!**\nВы: {m.dice.value} | Бот: {b_dice.dice.value}\nБаланс: {'+' if win > 0 else ''}`{win:.2f}$`"
+    text = f"**{res_text}!**\nВы: {m.dice.value} | Бот: {b_dice.dice.value}\n"
+    if win > 0:
+        text += f"💰 Выигрыш: `+{win:.2f}$`"
+    else:
+        text += f"💸 Проигрыш: `-{bet:.2f}$`"
     
     fid = await get_image_file_id(res_key)
     kb = main_menu_kb(m.from_user.id)
@@ -792,7 +985,8 @@ async def wallet_view(c: types.CallbackQuery):
 @dp.callback_query(F.data == "withdraw_ask")
 async def withdraw_ask_cb(c: types.CallbackQuery, state: FSMContext):
     u = await get_user(c.from_user.id)
-    if float(u.get('balance', 0)) < MIN_WITHDRAW: return await c.answer(f"❌ Мин вывод: {MIN_WITHDRAW}$", show_alert=True)
+    if float(u.get('balance', 0)) < MIN_WITHDRAW: 
+        return await c.answer(f"❌ Мин вывод: {MIN_WITHDRAW}$", show_alert=True)
     await c.message.answer("Введите сумму вывода:")
     await state.set_state(States.waiting_for_withdraw)
 
@@ -801,74 +995,101 @@ async def withdraw_handle(m: types.Message, state: FSMContext):
     try:
         amount = float(m.text.replace(',', '.'))
         u = await get_user(m.from_user.id)
-        if amount > float(u.get('balance', 0)): return await m.answer("❌ Мало средств")
+        if amount > float(u.get('balance', 0)): 
+            return await m.answer("❌ Недостаточно средств")
+        if amount < MIN_WITHDRAW: 
+            return await m.answer(f"❌ Мин сумма вывода: {MIN_WITHDRAW}$")
         
         check = await create_crypto_check(amount)
-        if not check["success"]: return await m.answer(f"Ошибка: {check['error']}")
+        if not check["success"]: 
+            return await m.answer(f"Ошибка создания чека: {check['error']}")
         
         await add_transaction(m.from_user.id, 'withdraw', amount, check_id=check.get("check_id"))
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET balance = balance - ?, total_withdrawn = total_withdrawn + ? WHERE user_id = ?", (amount, amount, m.from_user.id))
+            await db.execute(
+                "UPDATE users SET balance = balance - ?, total_withdrawn = total_withdrawn + ? WHERE user_id = ?", 
+                (amount, amount, m.from_user.id)
+            )
             await db.commit()
         await m.answer(f"✅ Чек создан: {check['check_url']}")
         await state.clear()
-    except: await m.answer("❌ Введите число")
+    except ValueError:
+        await m.answer("❌ Введите число")
+    except Exception as e:
+        await m.answer(f"❌ Ошибка: {str(e)}")
 
 @dp.callback_query(F.data == "deposit_auto")
 async def dep_ask(c: types.CallbackQuery, state: FSMContext):
-    await c.message.answer(f"Введите сумму (мин {MIN_DEPOSIT}$):")
+    await c.message.answer(f"Введите сумму для пополнения (мин {MIN_DEPOSIT}$):")
     await state.set_state(States.waiting_for_deposit)
 
 @dp.message(States.waiting_for_deposit)
 async def dep_create(m: types.Message, state: FSMContext):
     try:
-        val = float(m.text.replace(',', '.'))
-        inv = await crypto.create_invoice(asset='USDT', amount=val)
-        await add_transaction(m.from_user.id, 'deposit', val, inv.invoice_id)
+        amount = float(m.text.replace(',', '.'))
+        if amount < MIN_DEPOSIT:
+            return await m.answer(f"❌ Мин сумма пополнения: {MIN_DEPOSIT}$")
+            
+        inv = await crypto.create_invoice(asset='USDT', amount=amount)
+        await add_transaction(m.from_user.id, 'deposit', amount, inv.invoice_id)
         kb = InlineKeyboardBuilder()
         kb.button(text="💳 ОПЛАТИТЬ", url=inv.bot_invoice_url)
         kb.button(text="🔄 ПРОВЕРИТЬ", callback_data=f"check_{inv.invoice_id}")
         kb.button(text="❌ ОТМЕНА", callback_data="start_over")
         kb.adjust(1)
-        await m.answer(f"💎 Оплатите `{val}$`", reply_markup=kb.as_markup(), parse_mode="Markdown")
+        await m.answer(
+            f"💎 Оплатите `{amount}$` USDT", 
+            reply_markup=kb.as_markup(), 
+            parse_mode="Markdown"
+        )
         await state.clear()
-    except: await m.answer("Ошибка")
+    except ValueError:
+        await m.answer("❌ Введите число")
+    except Exception as e:
+        await m.answer(f"❌ Ошибка создания счета: {str(e)}")
 
 @dp.callback_query(F.data.startswith("check_"))
 async def dep_check(c: types.CallbackQuery):
     iid = int(c.data.split("_")[1])
-    invs = await crypto.get_invoices(invoice_ids=[iid])
-    if invs and invs[0].status == 'paid':
-        amt = float(invs[0].amount)
-        await update_transaction_status(invoice_id=str(iid))
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET balance = balance + ?, total_deposited = total_deposited + ? WHERE user_id = ?", (amt, amt, c.from_user.id))
-            await db.commit()
-        await c.message.answer("✅ Оплачено!")
-        await cmd_start(c)
-    else: await c.answer("⏳ Не оплачено", show_alert=True)
+    try:
+        invs = await crypto.get_invoices(invoice_ids=[iid])
+        if invs and invs[0].status == 'paid':
+            amt = float(invs[0].amount)
+            await update_transaction_status(invoice_id=str(iid))
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute(
+                    "UPDATE users SET balance = balance + ?, total_deposited = total_deposited + ? WHERE user_id = ?", 
+                    (amt, amt, c.from_user.id)
+                )
+                await db.commit()
+            await c.message.answer("✅ Оплачено! Баланс пополнен.")
+            await cmd_start(c)
+        else:
+            await c.answer("⏳ Счет еще не оплачен", show_alert=True)
+    except Exception as e:
+        await c.answer(f"❌ Ошибка проверки: {str(e)}", show_alert=True)
 
 # --- АДМИНКА ---
 @dp.callback_query(F.data == "admin_home")
 async def adm_panel(c: types.CallbackQuery):
     try:
-        # Принудительно приводим ID к int для надежности
         uid = int(c.from_user.id)
         if uid in ADMIN_IDS:
-            # ИСПОЛЬЗУЕМ send_or_edit_media, чтобы корректно удалить фото (если оно есть в меню)
-            # и отправить текстовое сообщение.
             await send_or_edit_media(c, "admin_home", "🔐 **АДМИН-ПАНЕЛЬ**", admin_menu_kb())
         else:
             await c.answer("⛔ Доступ запрещен", show_alert=True)
     except Exception as e:
-        # Логируем реальную ошибку
-        print(f"Error in adm_panel: {e}")
-        await c.answer(f"⛔ Ошибка: {e}", show_alert=True)
+        logging.error(f"Error in adm_panel: {e}")
+        await c.answer(f"⛔ Ошибка", show_alert=True)
 
 @dp.callback_query(F.data == "adm_images")
 async def adm_images_menu(c: types.CallbackQuery):
     if c.from_user.id in ADMIN_IDS:
-        await c.message.edit_text("🖼 **Управление картинками**\nВыберите раздел для смены фото:", reply_markup=admin_images_kb(), parse_mode="Markdown")
+        await c.message.edit_text(
+            "🖼 **Управление картинками**\nВыберите раздел для смены фото:", 
+            reply_markup=admin_images_kb(), 
+            parse_mode="Markdown"
+        )
 
 @dp.callback_query(F.data == "img_sub_help")
 async def img_sub_help(c: types.CallbackQuery):
@@ -906,7 +1127,8 @@ async def img_ask_photo(c: types.CallbackQuery, state: FSMContext):
         f"🖼 Редактирование: **{name}**\n\n"
         f"Текущий статус: {current}\n\n"
         f"📸 **Отправьте мне новое фото** для этого раздела.", 
-        reply_markup=kb.as_markup(), parse_mode="Markdown"
+        reply_markup=kb.as_markup(), 
+        parse_mode="Markdown"
     )
     await state.set_state(States.admin_upload_photo)
 
@@ -917,7 +1139,10 @@ async def img_save_photo(m: types.Message, state: FSMContext):
     file_id = m.photo[-1].file_id
     
     await save_image_file_id(key, file_id)
-    await m.answer(f"✅ Фото для **{IMAGE_KEYS.get(key, key)}** сохранено!", reply_markup=admin_images_kb())
+    await m.answer(
+        f"✅ Фото для **{IMAGE_KEYS.get(key, key)}** сохранено!", 
+        reply_markup=admin_images_kb()
+    )
     await state.clear()
 
 @dp.callback_query(F.data.startswith("img_del_"))
@@ -930,30 +1155,56 @@ async def img_delete_photo(c: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "adm_deposits")
 async def adm_deposits_cb(c: types.CallbackQuery):
-    if c.from_user.id not in ADMIN_IDS: return
+    if c.from_user.id not in ADMIN_IDS: 
+        return
     deposits = await get_transactions(trans_type='deposit', limit=10)
-    text = "📥 **ПОПОЛНЕНИЯ**\n\n" + "\n".join([f"{d['amount']}$ (ID:{d['user_id']}) {d['status']}" for d in deposits])
+    text = "📥 **ПОПОЛНЕНИЯ**\n\n"
+    if deposits:
+        for d in deposits:
+            text += f"• {d['amount']}$ (ID:{d['user_id']}) - {d['status']}\n"
+    else:
+        text += "Нет пополнений"
     await c.message.edit_text(text, reply_markup=admin_menu_kb(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "adm_withdraws")
 async def adm_withdraws_cb(c: types.CallbackQuery):
-    if c.from_user.id not in ADMIN_IDS: return
+    if c.from_user.id not in ADMIN_IDS: 
+        return
     wd = await get_transactions(trans_type='withdraw', limit=10)
-    text = "📤 **ВЫВОДЫ**\n\n" + "\n".join([f"{d['amount']}$ (ID:{d['user_id']}) {d['status']}" for d in wd])
+    text = "📤 **ВЫВОДЫ**\n\n"
+    if wd:
+        for d in wd:
+            text += f"• {d['amount']}$ (ID:{d['user_id']}) - {d['status']}\n"
+    else:
+        text += "Нет выводов"
     await c.message.edit_text(text, reply_markup=admin_menu_kb(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "adm_stats")
 async def adm_stats_cb(c: types.CallbackQuery):
-    if c.from_user.id not in ADMIN_IDS: return
+    if c.from_user.id not in ADMIN_IDS: 
+        return
     async with aiosqlite.connect(DB_NAME) as db:
         users = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
         bal = (await (await db.execute("SELECT SUM(balance) FROM users")).fetchone())[0] or 0
-    await c.message.edit_text(f"📊 **СТАТИСТИКА**\nUsers: {users}\nBalances: {bal:.2f}$", reply_markup=admin_menu_kb(), parse_mode="Markdown")
+        total_bets = (await (await db.execute("SELECT SUM(total_bets) FROM users")).fetchone())[0] or 0
+        total_deposits = (await (await db.execute("SELECT SUM(total_deposited) FROM users")).fetchone())[0] or 0
+        total_withdraws = (await (await db.execute("SELECT SUM(total_withdrawn) FROM users")).fetchone())[0] or 0
+        
+    text = (
+        f"📊 **СТАТИСТИКА**\n\n"
+        f"👥 Пользователей: {users}\n"
+        f"💰 Общий баланс: {bal:.2f}$\n"
+        f"🎮 Всего ставок: {total_bets:.2f}$\n"
+        f"📥 Пополнений: {total_deposits:.2f}$\n"
+        f"📤 Выводов: {total_withdraws:.2f}$\n"
+    )
+    await c.message.edit_text(text, reply_markup=admin_menu_kb(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "adm_ban_menu")
 async def adm_ban_st(c: types.CallbackQuery, state: FSMContext):
-    if c.from_user.id not in ADMIN_IDS: return
-    await c.message.answer("Введите ID пользователя:")
+    if c.from_user.id not in ADMIN_IDS: 
+        return
+    await c.message.answer("Введите ID пользователя для бана/разбана:")
     await state.set_state(States.admin_manage_ban)
 
 @dp.message(States.admin_manage_ban)
@@ -962,37 +1213,188 @@ async def adm_ban_fin(m: types.Message, state: FSMContext):
         uid = int(m.text)
         u = await get_user(uid)
         if u:
-            new = 1 if u['is_banned']==0 else 0
+            new = 1 if u['is_banned'] == 0 else 0
             async with aiosqlite.connect(DB_NAME) as db:
                 await db.execute("UPDATE users SET is_banned = ? WHERE user_id = ?", (new, uid))
                 await db.commit()
-            await m.answer(f"Статус бана для {uid}: {new}")
-        else: await m.answer("Юзер не найден")
-    except: await m.answer("Ошибка")
+            await m.answer(f"✅ Статус бана для {uid} изменен на: {'ЗАБАНЕН' if new else 'РАЗБАНЕН'}")
+        else: 
+            await m.answer("❌ Пользователь не найден")
+    except ValueError:
+        await m.answer("❌ Введите корректный ID")
+    except Exception as e:
+        await m.answer(f"❌ Ошибка: {str(e)}")
     await state.clear()
 
 @dp.callback_query(F.data == "adm_give")
 async def adm_give_st(c: types.CallbackQuery, state: FSMContext):
-    if c.from_user.id not in ADMIN_IDS: return
-    await c.message.answer("Введите: ID сумма")
+    if c.from_user.id not in ADMIN_IDS: 
+        return
+    await c.message.answer("Введите: ID сумма (например: 123456789 10.5)")
     await state.set_state(States.admin_giving_balance)
 
 @dp.message(States.admin_giving_balance)
 async def adm_give_fin(m: types.Message, state: FSMContext):
     try:
-        uid, amt = map(float, m.text.split())
+        parts = m.text.split()
+        if len(parts) != 2:
+            return await m.answer("❌ Неверный формат. Используйте: ID сумма")
+        
+        uid = int(parts[0])
+        amt = float(parts[1])
+        
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amt, int(uid)))
+            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amt, uid))
             await db.commit()
-        await m.answer("Выдано!")
-    except: await m.answer("Ошибка формата")
+        
+        await m.answer(f"✅ Выдано {amt}$ пользователю {uid}")
+        
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(
+                uid, 
+                f"🎁 **Бонус от администрации!**\n\nВам начислено: `{amt}$`\n💰 Новый баланс: +{amt}$",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+            
+    except ValueError:
+        await m.answer("❌ Введите корректные числа")
+    except Exception as e:
+        await m.answer(f"❌ Ошибка: {str(e)}")
     await state.clear()
+
+# --- НАСТРОЙКА КОЭФФИЦИЕНТОВ ---
+@dp.callback_query(F.data == "adm_settings")
+async def adm_settings_menu(c: types.CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS: 
+        return
+    await c.message.edit_text(
+        "⚙️ **НАСТРОЙКА КОЭФФИЦИЕНТОВ**\n\n"
+        "Выберите параметр для изменения:", 
+        reply_markup=admin_settings_kb(), 
+        parse_mode="Markdown"
+    )
+
+# Обработчики для изменения коэффициентов
+@dp.callback_query(F.data.in_([
+    "set_dice_win", "set_dice_draw", "set_darts_win", "set_darts_draw",
+    "set_football_win", "set_football_draw", "set_basket_win", "set_basket_draw",
+    "set_bowling_win", "set_bowling_draw"
+]))
+async def adm_set_coeff_start(c: types.CallbackQuery, state: FSMContext):
+    if c.from_user.id not in ADMIN_IDS: 
+        return
+    
+    param_map = {
+        "set_dice_win": "dice_win",
+        "set_dice_draw": "dice_draw",
+        "set_darts_win": "darts_win",
+        "set_darts_draw": "darts_draw",
+        "set_football_win": "football_win",
+        "set_football_draw": "football_draw",
+        "set_basket_win": "basket_win",
+        "set_basket_draw": "basket_draw",
+        "set_bowling_win": "bowling_win",
+        "set_bowling_draw": "bowling_draw"
+    }
+    
+    param = param_map.get(c.data)
+    current_value = GAME_CONFIG.get(param, 1.0)
+    
+    # Определяем тип настройки
+    if "win" in param:
+        setting_type = "победы"
+        example = "1.95"
+    else:
+        setting_type = "ничьей (возврат)"
+        example = "0.93"
+    
+    await state.update_data(settings_param=param)
+    await c.message.answer(
+        f"Введите новый коэффициент для **{setting_type}**\n"
+        f"Текущее значение: `{current_value}`\n"
+        f"Пример: `{example}`"
+    )
+    await state.set_state(States.admin_set_dice_win)  # Используем существующее состояние
+
+@dp.message(States.admin_set_dice_win)
+async def adm_set_coeff_finish(m: types.Message, state: FSMContext):
+    try:
+        new_value = float(m.text.replace(',', '.'))
+        if new_value <= 0:
+            return await m.answer("❌ Коэффициент должен быть больше 0")
+        
+        data = await state.get_data()
+        param = data.get("settings_param")
+        
+        await save_setting(param, new_value)
+        await m.answer(f"✅ Коэффициент {param} установлен: {new_value}")
+        await adm_settings_menu(m)
+        await state.clear()
+    except ValueError:
+        await m.answer("❌ Введите число")
+
+# Настройка мин
+@dp.callback_query(F.data == "adm_set_mines_menu")
+async def adm_mines_menu(c: types.CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS: 
+        return
+    await c.message.edit_text(
+        "💣 **НАСТРОЙКА МИН**\n\n"
+        "Выберите количество мин для изменения процента выплаты:", 
+        reply_markup=admin_mines_settings_kb(), 
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith("set_m_share_"))
+async def adm_set_mines_share_start(c: types.CallbackQuery, state: FSMContext):
+    if c.from_user.id not in ADMIN_IDS: 
+        return
+    
+    mines_count = int(c.data.split("_")[3])
+    current_share = GAME_CONFIG["mines_config"].get(str(mines_count), 0.9)
+    
+    await state.update_data(mines_count=mines_count)
+    await c.message.answer(
+        f"💣 Введите процент выплаты для {mines_count} мин\n"
+        f"Текущее значение: {int(current_share*100)}%\n"
+        f"Пример: 85 (для 85%)"
+    )
+    await state.set_state(States.admin_set_mines_specific)
+
+@dp.message(States.admin_set_mines_specific)
+async def adm_set_mines_share_finish(m: types.Message, state: FSMContext):
+    try:
+        percent = float(m.text.replace(',', '.'))
+        if percent < 1 or percent > 100:
+            return await m.answer("❌ Процент должен быть от 1 до 100")
+        
+        share = percent / 100
+        data = await state.get_data()
+        mines_count = str(data.get("mines_count"))
+        
+        new_config = GAME_CONFIG["mines_config"].copy()
+        new_config[mines_count] = share
+        
+        await save_mines_config(new_config)
+        await m.answer(f"✅ Процент для {mines_count} мин установлен: {percent}%")
+        await adm_mines_menu(m)
+        await state.clear()
+    except ValueError:
+        await m.answer("❌ Введите число")
 
 async def main():
     await init_db()
     await update_db_schema()
     await load_settings()
-    print("Бот запущен...")
+    print("✅ Бот запущен...")
+    print(f"👤 Админы: {ADMIN_IDS}")
+    print("⚙️ Текущие коэффициенты:")
+    print(f"  • Dice победа: x{GAME_CONFIG['dice_win']}, ничья: x{GAME_CONFIG['dice_draw']}")
+    print(f"  • Darts победа: x{GAME_CONFIG['darts_win']}, ничья: x{GAME_CONFIG['darts_draw']}")
+    print(f"  • Football победа: x{GAME_CONFIG['football_win']}, ничья: x{GAME_CONFIG['football_draw']}")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
