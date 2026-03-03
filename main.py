@@ -962,6 +962,122 @@ async def adm_settings_cb(c: types.CallbackQuery):
     
     await c.message.edit_text(text, reply_markup=admin_settings_kb(), parse_mode="Markdown")
 
+@dp.callback_query(F.data == "set_dice_win")
+async def set_dice_win_start(c: types.CallbackQuery, state: FSMContext):
+    if c.from_user.id not in ADMIN_IDS:
+        return await c.answer("⛔ Доступ запрещен", show_alert=True)
+    
+    await c.message.answer(f"🎲 Текущий коэффициент победы: x{GAME_CONFIG['dice_win']}\nВведите новый коэффициент (например: 1.8):")
+    await state.set_state(States.admin_set_dice_win)
+
+@dp.message(States.admin_set_dice_win)
+async def set_dice_win_finish(m: types.Message, state: FSMContext):
+    try:
+        new_value = float(m.text.replace(',', '.'))
+        if new_value <= 0:
+            await m.answer("❌ Коэффициент должен быть больше 0")
+            return
+        
+        await save_setting("dice_win", new_value)
+        await m.answer(f"✅ Коэффициент победы изменен на x{new_value}")
+        await state.clear()
+        
+        # Возвращаемся в меню настроек
+        await adm_settings_cb(types.CallbackQuery(
+            id="fake",
+            from_user=m.from_user,
+            message=await m.answer("..."),
+            data="adm_settings"
+        ))
+    except ValueError:
+        await m.answer("❌ Введите число!")
+
+@dp.callback_query(F.data == "set_dice_draw")
+async def set_dice_draw_start(c: types.CallbackQuery, state: FSMContext):
+    if c.from_user.id not in ADMIN_IDS:
+        return await c.answer("⛔ Доступ запрещен", show_alert=True)
+    
+    await c.message.answer(f"⚖️ Текущий коэффициент ничьей: x{GAME_CONFIG['dice_draw']}\nВведите новый коэффициент (например: 0.5):")
+    await state.set_state(States.admin_set_dice_draw)
+
+@dp.message(States.admin_set_dice_draw)
+async def set_dice_draw_finish(m: types.Message, state: FSMContext):
+    try:
+        new_value = float(m.text.replace(',', '.'))
+        if new_value < 0:
+            await m.answer("❌ Коэффициент должен быть больше или равен 0")
+            return
+        
+        await save_setting("dice_draw", new_value)
+        await m.answer(f"✅ Коэффициент ничьей изменен на x{new_value}")
+        await state.clear()
+        
+        # Возвращаемся в меню настроек
+        await adm_settings_cb(types.CallbackQuery(
+            id="fake",
+            from_user=m.from_user,
+            message=await m.answer("..."),
+            data="adm_settings"
+        ))
+    except ValueError:
+        await m.answer("❌ Введите число!")
+
+@dp.callback_query(F.data == "adm_set_mines_menu")
+async def adm_set_mines_menu(c: types.CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS:
+        return await c.answer("⛔ Доступ запрещен", show_alert=True)
+    
+    await c.message.edit_text(
+        "💣 **НАСТРОЙКА КОЭФФИЦИЕНТОВ МИН**\n\n"
+        "Выберите количество мин для настройки доли выигрыша:",
+        reply_markup=admin_mines_settings_kb(),
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith("set_m_share_"))
+async def set_mines_share_start(c: types.CallbackQuery, state: FSMContext):
+    if c.from_user.id not in ADMIN_IDS:
+        return await c.answer("⛔ Доступ запрещен", show_alert=True)
+    
+    mines_count = c.data.split("_")[3]
+    current_share = GAME_CONFIG["mines_config"].get(mines_count, 0.9)
+    
+    await state.update_data(mines_count=mines_count)
+    await c.message.answer(
+        f"💣 Текущая доля для {mines_count} мин: {int(current_share*100)}%\n"
+        f"Введите новую долю в процентах (0-100):"
+    )
+    await state.set_state(States.admin_set_mines_specific)
+
+@dp.message(States.admin_set_mines_specific)
+async def set_mines_share_finish(m: types.Message, state: FSMContext):
+    try:
+        percent = float(m.text.replace(',', '.'))
+        if percent < 0 or percent > 100:
+            await m.answer("❌ Введите число от 0 до 100")
+            return
+        
+        data = await state.get_data()
+        mines_count = data.get("mines_count")
+        
+        # Обновляем конфигурацию
+        new_config = GAME_CONFIG["mines_config"].copy()
+        new_config[mines_count] = percent / 100
+        
+        await save_mines_config(new_config)
+        await m.answer(f"✅ Доля для {mines_count} мин изменена на {percent}%")
+        await state.clear()
+        
+        # Возвращаемся в меню настроек мин
+        await adm_set_mines_menu(types.CallbackQuery(
+            id="fake",
+            from_user=m.from_user,
+            message=await m.answer("..."),
+            data="adm_set_mines_menu"
+        ))
+    except ValueError:
+        await m.answer("❌ Введите число!")
+
 @dp.callback_query(F.data == "adm_stats")
 async def adm_stats_cb(c: types.CallbackQuery):
     if c.from_user.id not in ADMIN_IDS: return
