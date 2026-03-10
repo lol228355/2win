@@ -18,7 +18,7 @@ from aiocryptopay import AioCryptoPay
 
 # ⚙️ КОНФИГУРАЦИЯ
 BOT_TOKEN = "8295201485:AAE1Lyq2USLlnx0NIJJWNyZlXQDBluQY044"
-CRYPTO_PAY_TOKEN = "538568:AAuVgbjq7EYZWydFojnRp6CvMIbYaDOZDa8"
+CRYPTO_PAY_TOKEN = "514479:AAb64Swo8pexGV3iVkgI4MqdlYYsg22BhOZ"
 
 # ❗ ВАЖНО: ID админов (числа).
 ADMIN_IDS = [
@@ -545,7 +545,7 @@ async def help_cb(c: types.CallbackQuery):
         "Если нашли баг или есть вопросы по выплатам, нажмите кнопку ниже."
     )
     kb = InlineKeyboardBuilder()
-    kb.button(text="👨‍💻 Обратиться к Админу", url="https://t.me/Gemini_0")
+    kb.button(text="👨‍💻 Обратиться к Админу", url="https://t.me/mgesnaiper2")
     kb.button(text="🔙 Назад", callback_data="start_over")
     kb.adjust(1)
     await send_or_edit_media(c, "help", text, kb.as_markup())
