@@ -823,6 +823,12 @@ async def dep_ask(c: types.CallbackQuery, state: FSMContext):
 async def dep_create(m: types.Message, state: FSMContext):
     try:
         val = float(m.text.replace(',', '.'))
+        
+        # --- ДОБАВЛЕННАЯ ПРОВЕРКА ---
+        if val < MIN_DEPOSIT:
+            return await m.answer(f"❌ Минимальная сумма пополнения: {MIN_DEPOSIT}$")
+        # ----------------------------
+        
         inv = await crypto.create_invoice(asset='USDT', amount=val)
         await add_transaction(m.from_user.id, 'deposit', val, inv.invoice_id)
         kb = InlineKeyboardBuilder()
